@@ -7,14 +7,17 @@ simples; o pequeno arquivo assembly prepara a pilha e chama `kernel_main`.
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `pwd`, `mkdir`,
 `write`, `cat`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4 por
 setores ATA PIO. `make run` cria `ext4.img` separadamente, preservando a antiga
-`disk.img`. Arquivos gravados pelo maiOs podem ter até 1024 bytes.
+`disk.img`. O driver mapeia blocos diretos, indiretos simples e duplos, permitindo
+arquivos de vários MiB, limitados pelo espaço livre da imagem de 8 MiB.
 
-O driver inicial suporta uma configuração ext4 simples de um grupo, blocos de
-1024 bytes e endereçamento direto. Ele não suporta journal, extents, checksums,
-partições, subdiretórios navegáveis ou sistemas de arquivos com recursos
-avançados. A imagem criada pelo Makefile desativa esses recursos. Sem journal,
-uma queda de energia durante a gravação pode corromper metadados. Evite montar
-a imagem simultaneamente no Linux e no QEMU.
+Para gravar várias linhas, use `write NOME`, digite o conteúdo e finalize com um
+ponto sozinho em uma linha. `cat NOME` lê os blocos do arquivo em sequência.
+
+O driver suporta uma configuração ext4 simples de um grupo e blocos de 1024
+bytes. Ele não suporta journal, extents, checksums, partições ou navegação em
+subdiretórios. A imagem criada pelo Makefile desativa esses recursos. Sem
+journal, uma queda de energia durante a gravação pode corromper metadados. Evite
+montar a imagem simultaneamente no Linux e no QEMU.
 
 Exemplos:
 

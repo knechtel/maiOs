@@ -15,6 +15,8 @@ static int disk_ready;
 static int streq(const char *left, const char *right);
 static void print(const char *text);
 static void put_char(char c);
+static char read_key(void);
+static void write_interactive(const char *name);
 
 static inline uint8_t inb(uint16_t port)
 {
@@ -129,9 +131,16 @@ static void list_files(void)
 
 static void show_file(const char *name)
 {
-    uint8_t data[1024]; size_t size = 0;
-    if (!ext4_read(name, data, sizeof(data), &size)) { print("Arquivo nao encontrado ou nao suportado.\n"); return; }
-    for (size_t i = 0; i < size; ++i) put_char((char)data[i]);
+    uint32_t size;
+    uint8_t data[1024];
+    if (!ext4_read_start(name, &size)) { print("Arquivo nao encontrado ou nao suportado.\n"); return; }
+    for (uint32_t block = 0; block < (size + 1023) / 1024; ++block) {
+        if (!ext4_read_block(block, data)) { print("Erro ao ler bloco do arquivo.\n"); break; }
+        uint32_t count = size - block * 1024;
+        if (count > 1024) count = 1024;
+        for (uint32_t i = 0; i < count; ++i) put_char((char)data[i]);
+    }
+    ext4_read_end();
     put_char('\n');
 }
 
@@ -156,7 +165,7 @@ static void execute_command(char *command)
         print("  ls         lista arquivos e diretorios\n");
         print("  pwd        mostra o diretorio atual\n");
         print("  mkdir NOME cria um diretorio no disco\n");
-        print("  write NOME TEXTO salva texto no disco\n");
+        print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
         print("  halt       para a CPU\n");
         print("  reboot     reinicia a maquina\n");
@@ -191,7 +200,9 @@ static void execute_command(char *command)
         char *contents = name;
         while (*contents && *contents != ' ') ++contents;
         if (*contents == '\0') {
-            print("Uso: write NOME TEXTO\n");
+            if (!disk_ready) print("Disco indisponivel.\n");
+            else if (!valid_file_name(name)) print("Uso: write NOME [TEXTO]\n");
+            else write_interactive(name);
         } else {
             *contents++ = '\0';
             if (!disk_ready) print("Disco indisponivel.\n");
@@ -199,7 +210,7 @@ static void execute_command(char *command)
             else {
                 size_t size = 0; while (contents[size]) ++size;
                 if (ext4_write(name, (const uint8_t *)contents, size)) print("Arquivo salvo no ext4.\n");
-                else print("Erro ao gravar: limite de 1024 bytes ou recurso ext4 nao suportado.\n");
+                else print("Erro ao gravar: espaco insuficiente ou recurso ext4 nao suportado.\n");
             }
         }
     } else if (starts_with(command, "cat ")) {
@@ -244,6 +255,54 @@ static char read_key(void)
                 return keymap[scan];
         }
         __asm__ volatile ("pause");
+    }
+}
+
+static void write_interactive(const char *name)
+{
+    char line[INPUT_SIZE];
+    uint8_t block[1024];
+    size_t line_length = 0;
+    size_t used = 0;
+    uint32_t written = 0;
+    uint32_t block_index = 0;
+
+    if (!ext4_write_begin(name)) { print("Nao foi possivel abrir o arquivo para gravacao.\n"); return; }
+    print("Digite o texto; finalize com um ponto sozinho em uma linha.\n");
+    for (;;) {
+        char key = read_key();
+        if (key == '\n') {
+            put_char('\n');
+            if (line_length == 1 && line[0] == '.') {
+                if (used && !ext4_write_block(block_index, block, used)) {
+                    ext4_write_finish(written);
+                    print("Erro ao gravar o arquivo.\n");
+                    return;
+                }
+                written += (uint32_t)used;
+                if (ext4_write_finish(written)) print("Arquivo salvo no ext4.\n");
+                else print("Erro ao finalizar o arquivo.\n");
+                return;
+            }
+            for (size_t i = 0; i <= line_length; ++i) {
+                block[used++] = i == line_length ? '\n' : (uint8_t)line[i];
+                if (used == sizeof(block)) {
+                    if (!ext4_write_block(block_index++, block, used)) {
+                        ext4_write_finish(written);
+                        print("Erro ao gravar o arquivo.\n");
+                        return;
+                    }
+                    written += sizeof(block);
+                    used = 0;
+                }
+            }
+            line_length = 0;
+        } else if (key == '\b') {
+            if (line_length) { --line_length; put_char('\b'); }
+        } else if (key != '\t' && line_length < INPUT_SIZE - 1) {
+            line[line_length++] = key;
+            put_char(key);
+        }
     }
 }
 

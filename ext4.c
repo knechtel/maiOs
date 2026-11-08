@@ -10,6 +10,10 @@ static uint8_t super[BLOCK_SIZE];
 static uint8_t group[BLOCK_SIZE];
 static uint32_t blocks_count, inodes_count, blocks_per_group, inodes_per_group;
 static uint32_t inode_size, block_bitmap, inode_bitmap, inode_table;
+static uint32_t active_inode;
+static uint8_t active_inode_data[128];
+static uint32_t read_inode;
+static uint8_t read_inode_data[128];
 
 static inline uint8_t inb(uint16_t p) { uint8_t v; __asm__ volatile("inb %1,%0":"=a"(v):"Nd"(p)); return v; }
 static inline void outb(uint16_t p,uint8_t v) { __asm__ volatile("outb %0,%1"::"a"(v),"Nd"(p)); }
@@ -71,6 +75,76 @@ static int allocate_block(uint32_t *block){
     return block_write(2,group)&&block_write(1,super);
 }
 
+static int allocate_zero_block(uint32_t *block) {
+    uint8_t empty[BLOCK_SIZE];
+    if(!allocate_block(block))return 0;
+    zero(empty,sizeof(empty));
+    return block_write(*block,empty);
+}
+
+static int inode_map_block(uint32_t ino,uint8_t *raw,uint32_t logical,int create,uint32_t *result) {
+    uint32_t ptr,offset;
+    uint8_t table[BLOCK_SIZE];
+    if(logical<12) {
+        offset=40+logical*4; ptr=rd32(raw+offset);
+        if(!ptr&&create) {
+            if(!allocate_zero_block(&ptr))return 0;
+            wr32(raw+offset,ptr); wr32(raw+28,rd32(raw+28)+2);
+            if(!inode_write(ino,raw))return 0;
+        }
+        *result=ptr; return ptr!=0;
+    }
+
+    logical-=12;
+    if(logical<256) {
+        ptr=rd32(raw+88);
+        if(!ptr&&create) {
+            if(!allocate_zero_block(&ptr))return 0;
+            wr32(raw+88,ptr); wr32(raw+28,rd32(raw+28)+2);
+            if(!inode_write(ino,raw))return 0;
+        }
+        if(!ptr||!block_read(ptr,table))return 0;
+        uint32_t data=rd32(table+logical*4);
+        if(!data&&create) {
+            if(!allocate_zero_block(&data))return 0;
+            wr32(table+logical*4,data);
+            if(!block_write(ptr,table))return 0;
+            wr32(raw+28,rd32(raw+28)+2);
+            if(!inode_write(ino,raw))return 0;
+        }
+        *result=data; return data!=0;
+    }
+
+    logical-=256;
+    if(logical>=256*256)return 0;
+    ptr=rd32(raw+92);
+    if(!ptr&&create) {
+        if(!allocate_zero_block(&ptr))return 0;
+        wr32(raw+92,ptr); wr32(raw+28,rd32(raw+28)+2);
+        if(!inode_write(ino,raw))return 0;
+    }
+    if(!ptr||!block_read(ptr,table))return 0;
+    uint32_t first=logical/256,second=logical%256;
+    uint32_t child=rd32(table+first*4);
+    if(!child&&create) {
+        if(!allocate_zero_block(&child))return 0;
+        wr32(table+first*4,child);
+        if(!block_write(ptr,table))return 0;
+        wr32(raw+28,rd32(raw+28)+2);
+        if(!inode_write(ino,raw))return 0;
+    }
+    if(!child||!block_read(child,table))return 0;
+    uint32_t data=rd32(table+second*4);
+    if(!data&&create) {
+        if(!allocate_zero_block(&data))return 0;
+        wr32(table+second*4,data);
+        if(!block_write(child,table))return 0;
+        wr32(raw+28,rd32(raw+28)+2);
+        if(!inode_write(ino,raw))return 0;
+    }
+    *result=data; return data!=0;
+}
+
 int ext4_mount(void){
     uint8_t sec[512]; mounted=0;
     if(!sector_io(2,sec,0))return 0;
@@ -110,19 +184,50 @@ int ext4_list(ext4_entry_t *entries,size_t capacity){
         if(ino&&len&&!(len==1&&data[off+8]=='.')&&!(len==2&&data[off+8]=='.'&&data[off+9]=='.')){if((size_t)count<capacity){size_t n=len<63?len:63;copy((uint8_t*)entries[count].name,data+off+8,n);entries[count].name[n]=0;entries[count].directory=data[off+7]==2;}count++;}off+=rec;}
     return count;
 }
-int ext4_read(const char *name,uint8_t *data,size_t cap,size_t *size){
-    uint32_t ino;uint8_t type,raw[128],block[BLOCK_SIZE];if(!mounted||!entry_find(name,&ino,&type)||type==2||!inode_read(ino,raw))return 0;
-    uint32_t n=rd32(raw+4);if(n>BLOCK_SIZE||n>cap||!block_read(rd32(raw+40),block))return 0;copy(data,block,n);*size=n;return 1;
+int ext4_read_start(const char *name,uint32_t *size){
+    uint32_t ino;uint8_t type;
+    if(!mounted||!entry_find(name,&ino,&type)||type==2||!inode_read(ino,read_inode_data))return 0;
+    read_inode=ino;*size=rd32(read_inode_data+4);return 1;
+}
+int ext4_read_block(uint32_t index,uint8_t *data){
+    uint32_t block;
+    return read_inode&&inode_map_block(read_inode,read_inode_data,index,0,&block)&&block_read(block,data);
+}
+void ext4_read_end(void){read_inode=0;zero(read_inode_data,sizeof(read_inode_data));}
+int ext4_write_begin(const char *name){
+    uint32_t ino;uint8_t type;
+    if(!mounted||active_inode)return 0;
+    if(entry_find(name,&ino,&type)) {
+        if(type==2||!inode_read(ino,active_inode_data))return 0;
+    } else {
+        if(!allocate_inode(&ino,0))return 0;
+        zero(active_inode_data,sizeof(active_inode_data));
+        wr16(active_inode_data,0x81a4);wr16(active_inode_data+26,1);
+        if(!inode_write(ino,active_inode_data)||!root_add(name,ino,1))return 0;
+    }
+    active_inode=ino;
+    wr32(active_inode_data+4,0);
+    return 1;
+}
+int ext4_write_block(uint32_t index,const uint8_t *data,size_t size){
+    uint32_t block;uint8_t buffer[BLOCK_SIZE];
+    if(!active_inode||index>=12+256+256*256||size>BLOCK_SIZE||!inode_map_block(active_inode,active_inode_data,index,1,&block))return 0;
+    zero(buffer,sizeof(buffer));copy(buffer,data,size);return block_write(block,buffer);
+}
+int ext4_write_finish(uint32_t size){
+    if(!active_inode)return 0;
+    wr32(active_inode_data+4,size);
+    int ok=inode_write(active_inode,active_inode_data);
+    active_inode=0;zero(active_inode_data,sizeof(active_inode_data));return ok;
 }
 int ext4_write(const char *name,const uint8_t *data,size_t size){
-    if(!mounted||size>BLOCK_SIZE)return 0;
-    uint32_t ino,blk;uint8_t type,raw[128],buf[BLOCK_SIZE];
-    if(entry_find(name,&ino,&type)){if(type==2||!inode_read(ino,raw))return 0;blk=rd32(raw+40);}else{
-        if(!allocate_inode(&ino,0)||!allocate_block(&blk))return 0;
-        zero(raw,128);wr16(raw,0x81a4);wr16(raw+26,1);wr32(raw+40,blk);wr32(raw+28,2);
-        if(!inode_write(ino,raw)||!root_add(name,ino,1))return 0;
+    if(size>MAX_BLOCKS*BLOCK_SIZE||!ext4_write_begin(name))return 0;
+    uint32_t blocks=(size+BLOCK_SIZE-1)/BLOCK_SIZE;
+    for(uint32_t i=0;i<blocks;i++){
+        size_t n=size-(size_t)i*BLOCK_SIZE;if(n>BLOCK_SIZE)n=BLOCK_SIZE;
+        if(!ext4_write_block(i,data+(size_t)i*BLOCK_SIZE,n)){ext4_write_finish(i*BLOCK_SIZE);return 0;}
     }
-    zero(buf,BLOCK_SIZE);copy(buf,data,size);if(!block_write(blk,buf))return 0;wr32(raw+4,size);return inode_write(ino,raw);
+    return ext4_write_finish((uint32_t)size);
 }
 int ext4_mkdir(const char *name){
     if(!mounted)return 0;
