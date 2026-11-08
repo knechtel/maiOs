@@ -5,11 +5,16 @@ interativo de texto VGA. O kernel lê o teclado PS/2 e oferece comandos internos
 simples; o pequeno arquivo assembly prepara a pilha e chama `kernel_main`.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `pwd`, `mkdir`,
-`write`, `cat`, `halt` e `reboot`. O armazenamento usa setores ATA PIO e uma
-imagem IDE (`disk.img`) criada automaticamente pelo `make run`. O sistema
-mantém até 16 arquivos de até 512 bytes, com nomes de até 15 caracteres.
-Os dados continuam na imagem quando o QEMU é fechado. `mkdir NOME` salva até
-8 diretórios no disco, com nomes de até 21 caracteres.
+`write`, `cat`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4 por
+setores ATA PIO. `make run` cria `ext4.img` separadamente, preservando a antiga
+`disk.img`. Arquivos gravados pelo maiOs podem ter até 1024 bytes.
+
+O driver inicial suporta uma configuração ext4 simples de um grupo, blocos de
+1024 bytes e endereçamento direto. Ele não suporta journal, extents, checksums,
+partições, subdiretórios navegáveis ou sistemas de arquivos com recursos
+avançados. A imagem criada pelo Makefile desativa esses recursos. Sem journal,
+uma queda de energia durante a gravação pode corromper metadados. Evite montar
+a imagem simultaneamente no Linux e no QEMU.
 
 Exemplos:
 
@@ -23,6 +28,7 @@ ls
 
 - GCC com suporte a compilação `-m32`
 - GNU `ld`, `make` e `qemu-system-i386`
+- `mke2fs` (pacote e2fsprogs), para criar `ext4.img`
 
 ## Compilar e executar
 

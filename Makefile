@@ -10,8 +10,8 @@ LDFLAGS = -m elf_i386 -T linker.ld
 
 all: kernel.elf
 
-kernel.elf: boot.o kernel.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot.o kernel.o
+kernel.elf: boot.o kernel.o ext4.o linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot.o kernel.o ext4.o
 
 boot.o: boot.s
 	$(AS) $(ASFLAGS) -c $< -o $@
@@ -19,11 +19,18 @@ boot.o: boot.s
 kernel.o: kernel.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+ext4.o: ext4.c ext4.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 disk.img:
 	truncate -s 1M disk.img
 
-run: kernel.elf disk.img
-	qemu-system-i386 -kernel kernel.elf -drive file=disk.img,format=raw,if=ide
+ext4.img:
+	truncate -s 8M ext4.img
+	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4.img
+
+run: kernel.elf ext4.img
+	qemu-system-i386 -kernel kernel.elf -drive file=ext4.img,format=raw,if=ide
 
 clean:
-	rm -f boot.o kernel.o kernel.elf
+	rm -f boot.o kernel.o ext4.o kernel.elf
