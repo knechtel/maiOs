@@ -5,10 +5,19 @@ interativo de texto VGA. O kernel lê o teclado PS/2 e oferece comandos internos
 simples; o pequeno arquivo assembly prepara a pilha e chama `kernel_main`.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `pwd`, `mkdir`,
-`halt` e `reboot`. O shell ainda não possui sistema de arquivos persistente:
-`mkdir NOME` registra diretórios apenas na memória, e `ls` lista os diretórios
-criados. Eles desaparecem quando o kernel é reiniciado; `pwd` sempre retorna
-`/`.
+`write`, `cat`, `halt` e `reboot`. O armazenamento usa setores ATA PIO e uma
+imagem IDE (`disk.img`) criada automaticamente pelo `make run`. O sistema
+mantém até 16 arquivos de até 512 bytes, com nomes de até 15 caracteres.
+Os dados continuam na imagem quando o QEMU é fechado. `mkdir NOME` salva até
+8 diretórios no disco, com nomes de até 21 caracteres.
+
+Exemplos:
+
+```text
+write notas oi mundo
+cat notas
+ls
+```
 
 ## Requisitos
 

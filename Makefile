@@ -1,7 +1,7 @@
 CC = gcc
 AS = gcc
 LD = ld
-CFLAGS = -m32 -std=c11 -ffreestanding -fno-pie -fno-stack-protector \
+CFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -std=c11 -ffreestanding -fno-pie -fno-stack-protector \
          -fno-asynchronous-unwind-tables -Wall -Wextra -O2
 ASFLAGS = -m32 -ffreestanding -fno-pie
 LDFLAGS = -m elf_i386 -T linker.ld
@@ -19,8 +19,11 @@ boot.o: boot.s
 kernel.o: kernel.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-run: kernel.elf
-	qemu-system-i386 -kernel kernel.elf
+disk.img:
+	truncate -s 1M disk.img
+
+run: kernel.elf disk.img
+	qemu-system-i386 -kernel kernel.elf -drive file=disk.img,format=raw,if=ide
 
 clean:
 	rm -f boot.o kernel.o kernel.elf
