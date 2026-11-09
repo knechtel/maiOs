@@ -11,6 +11,15 @@ static br_ssl_client_context tls_client;
 static br_x509_minimal_context tls_x509;
 static br_sslio_context tls_io;
 static uint8_t tls_buffer[32768];
+static int https_last_error;
+static int https_last_tls_error;
+static int https_last_io_direction;
+static int https_last_tcp_read_error;
+
+int net_https_last_error(void){return https_last_error;}
+int net_https_last_tls_error(void){return https_last_tls_error;}
+int net_https_last_io_direction(void){return https_last_io_direction;}
+int net_https_last_tcp_read_error(void){return https_last_tcp_read_error;}
 
 typedef struct {
     uint8_t buffer[512];
@@ -96,18 +105,21 @@ static int secure_seed(uint8_t seed[32])
 static int tcp_tls_read(void *ctx,unsigned char *data,size_t length)
 {
     (void)ctx;
+    https_last_io_direction=1;
     uint16_t received=0;
-    if(length>1000)length=1000;
+    if(length>1460)length=1460;
     int result=net_tcp_receive(data,(uint16_t)length,&received);
+    https_last_tcp_read_error=net_tcp_last_read_error();
     return result==1?(int)received:-1;
 }
 
 static int tcp_tls_write(void *ctx,const unsigned char *data,size_t length)
 {
     (void)ctx;
+    https_last_io_direction=2;
     size_t offset=0;
     while(offset<length){
-        uint16_t part=(uint16_t)(length-offset>1000?1000:length-offset);
+        uint16_t part=(uint16_t)(length-offset>1460?1460:length-offset);
         if(!net_tcp_send(data+offset,part))return -1;
         offset+=part;
     }
@@ -288,6 +300,7 @@ int net_https_request(const char *host,const char *path,const char *method,
                       uint16_t *status_code)
 {
     uint32_t address,response_size=0;uint16_t request_length=0;char request[4096];uint8_t seed[32];
+    https_last_error=NET_HTTPS_ERROR_NONE;https_last_tls_error=BR_ERR_OK;https_last_io_direction=0;https_last_tcp_read_error=NET_TCP_READ_ERROR_NONE;
     if(!host||!path||!method||!response_length||!status_code||(!body&&body_length))return 0;
     if(!text_equal_ci(method,"GET")&&!text_equal_ci(method,"POST"))return 0;
     if(path[0]!='/')return 0;
@@ -296,17 +309,22 @@ int net_https_request(const char *host,const char *path,const char *method,
     for(uint16_t i=0;host[i];i++)if(i>=253||host[i]=='\r'||host[i]=='\n'||host[i]==' '||host[i]=='/')return 0;
     for(uint16_t i=0;path[i];i++)if(path[i]=='\r'||path[i]=='\n'||path[i]==' ')return 0;
     for(uint16_t i=0;headers&&headers[i];i++)if(headers[i]=='\r'&&(headers[i+1]!='\n'))return 0;
-    if(!net_dns_resolve(host,&address)||!net_tcp_connect(address,443))return 0;
+    if(!net_dns_resolve(host,&address)){https_last_error=NET_HTTPS_ERROR_DNS;return 0;}
+    if(!net_tcp_connect(address,443)){https_last_error=NET_HTTPS_ERROR_TCP;return 0;}
 
     br_ssl_client_init_full(&tls_client,&tls_x509,maios_trust_anchors,maios_trust_anchor_count);
     br_ssl_engine_set_versions(&tls_client.eng,BR_TLS12,BR_TLS12);
     br_ssl_engine_set_buffer(&tls_client.eng,tls_buffer,sizeof tls_buffer,1);
-    if(!rtc_set_validation_time()||!secure_seed(seed)){
-        (void)net_tcp_close();return 0;
+    if(!rtc_set_validation_time()){
+        https_last_error=NET_HTTPS_ERROR_CLOCK;(void)net_tcp_close();return 0;
+    }
+    if(!secure_seed(seed)){
+        https_last_error=NET_HTTPS_ERROR_RANDOM;(void)net_tcp_close();return 0;
     }
     br_ssl_engine_inject_entropy(&tls_client.eng,seed,sizeof seed);
     for(uint8_t i=0;i<sizeof seed;i++)seed[i]=0;
     if(!br_ssl_client_reset(&tls_client,host,0)){
+        https_last_error=NET_HTTPS_ERROR_TLS;https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);
         (void)net_tcp_close();return 0;
     }
     br_sslio_init(&tls_io,&tls_client.eng,tcp_tls_read,0,tcp_tls_write,0);
@@ -322,15 +340,18 @@ int net_https_request(const char *host,const char *path,const char *method,
            !append_decimal(request,sizeof request,&request_length,body_length)||!append_text(request,sizeof request,&request_length,"\r\n")))||
        !append_text(request,sizeof request,&request_length,"\r\n")||
        br_sslio_write_all(&tls_io,request,request_length)<0){
+        https_last_error=NET_HTTPS_ERROR_TLS;https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);
         (void)net_tcp_close();return 0;
     }
     for(uint32_t offset=0;offset<body_length;){
         uint16_t count=(uint16_t)(body_length-offset>512?512:body_length-offset);
-        if(br_sslio_write_all(&tls_io,body+offset,count)<0){(void)net_tcp_close();return 0;}
+        if(br_sslio_write_all(&tls_io,body+offset,count)<0){https_last_error=NET_HTTPS_ERROR_TLS;https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);(void)net_tcp_close();return 0;}
         offset+=count;
     }
-    if(br_sslio_flush(&tls_io)<0){(void)net_tcp_close();return 0;}
+    if(br_sslio_flush(&tls_io)<0){https_last_error=NET_HTTPS_ERROR_TLS;https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);(void)net_tcp_close();return 0;}
     https_reader_t reader={0};int ok=parse_http_response(&reader,sink,context,&response_size,status_code);
+    if(!ok){https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);
+        https_last_error=https_last_tls_error==BR_ERR_OK?NET_HTTPS_ERROR_HTTP:NET_HTTPS_ERROR_TLS;}
     (void)net_tcp_close();
     *response_length=response_size;
     return ok;

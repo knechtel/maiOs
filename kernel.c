@@ -43,6 +43,36 @@ static void print_u32(uint32_t value)
     while(count)put_char(digits[--count]);
 }
 
+static void print_https_failure(void)
+{
+    int failure=net_https_last_error();
+    if(failure==NET_HTTPS_ERROR_DNS)print("Falha DNS ao resolver o host.\n");
+    else if(failure==NET_HTTPS_ERROR_TCP)print("Falha na conexao TCP porta 443.\n");
+    else if(failure==NET_HTTPS_ERROR_CLOCK)print("Relogio RTC invalido para validar certificados.\n");
+    else if(failure==NET_HTTPS_ERROR_RANDOM)print("RDRAND indisponivel para iniciar TLS.\n");
+    else if(failure==NET_HTTPS_ERROR_TLS){
+        int direction=net_https_last_io_direction();
+        print("I/O TCP do TLS falhou na ");print(direction==1?"leitura":"escrita");
+        if(direction==2){
+            int tcp_error=net_tcp_last_send_error();
+            if(tcp_error==NET_TCP_SEND_ERROR_FRAME)print(" (placa recusou o envio)");
+            else if(tcp_error==NET_TCP_SEND_ERROR_RESET)print(" (servidor enviou RST)");
+            else if(tcp_error==NET_TCP_SEND_ERROR_FIN)print(" (servidor encerrou a conexao)");
+            else if(tcp_error==NET_TCP_SEND_ERROR_ACK_TIMEOUT)print(" (ACK nao chegou apos retransmissoes)");
+            else if(tcp_error==NET_TCP_SEND_ERROR_BAD_ACK_DATA)print(" (segmento recebido invalido ou fora de ordem)");
+        }else if(direction==1){
+            int tcp_error=net_https_last_tcp_read_error();
+            if(tcp_error==NET_TCP_READ_ERROR_TIMEOUT)print(" (tempo de espera esgotado sem dados)");
+            else if(tcp_error==NET_TCP_READ_ERROR_RESET)print(" (servidor enviou RST)");
+            else if(tcp_error==NET_TCP_READ_ERROR_FIN)print(" (servidor encerrou a conexao)");
+            else if(tcp_error==NET_TCP_READ_ERROR_BAD_SEQUENCE)print(" (segmento recebido fora de ordem)");
+            else if(tcp_error==NET_TCP_READ_ERROR_OVERSIZE)print(" (segmento maior que o buffer TCP)");
+        }
+        print("; erro BearSSL ");print_u32((uint32_t)net_https_last_tls_error());put_char('.');put_char('\n');
+    }else if(failure==NET_HTTPS_ERROR_HTTP)print("Resposta recebida, mas HTTP estava incompleto ou malformado.\n");
+    else print("Falha HTTPS sem detalhe disponivel.\n");
+}
+
 static size_t str_length(const char *text)
 {
     size_t length=0;while(text[length])length++;return length;
@@ -397,6 +427,10 @@ static void git_process_ref_line(git_refs_state_t *state)
     }
     name[name_length]=0;
     if(!name_length||starts_with(name,"^{}")){state->line_length=0;return;}
+    if(!state->default_ref[0]&&starts_with(name,"refs/heads/")){
+        uint16_t n=0;while(name[n]&&n+1<sizeof(state->default_ref)){state->default_ref[n]=name[n];n++;}
+        state->default_ref[n]=0;
+    }
     if(state->list_refs){git_print_oid(line,oid_length);put_char(' ');print(name);put_char('\n');}
     if(!state->found&&git_ref_matches(state->requested,name)){
         for(uint8_t i=0;i<oid_length;i++)state->oid[i]=line[i];
@@ -451,10 +485,16 @@ static int git_discover_refs(const char *host,const char *repository,const char 
     uint32_t response_length=0;uint16_t status=0;
     int ok=net_https_request(host,endpoint,"GET","Accept: application/x-git-upload-pack-advertisement\r\n",
                              0,0,git_refs_sink,&state,&response_length,&status);
-    if(!ok||status!=200||state.malformed||!state.saw_flush)return 0;
+    if(!ok){
+        print_https_failure();return 0;
+    }
+    if(status!=200){print("Servidor respondeu HTTP ");print_u32(status);print(" ao consultar info/refs.\n");return 0;}
+    if(state.malformed){print("Resposta Git info/refs contem pkt-line invalido.\n");return 0;}
+    if(!state.saw_flush){print("Resposta Git info/refs terminou sem o pacote flush.\n");return 0;}
     if(state.found){for(uint8_t i=0;i<=state.oid_length;i++)oid[i]=state.oid[i];*oid_length=state.oid_length;}
     if(side_band_64k)*side_band_64k=state.side_band_64k;
     if(default_ref&&default_ref_capacity){uint16_t i=0;while(state.default_ref[i]&&i+1<default_ref_capacity){default_ref[i]=state.default_ref[i];i++;}default_ref[i]=0;}
+    if(requested&&!state.found){print("A referencia pedida nao foi anunciada pelo servidor.\n");return 0;}
     return !requested||state.found;
 }
 
@@ -557,17 +597,28 @@ static int git_fetch_pack(const char *host,const char *repository,const char *re
 static int git_clone_repo(const char *host,const char *repository,const char *directory)
 {
     char oid[65],default_ref[128];uint8_t oid_length=0;
-    if(!git_discover_refs(host,repository,0,0,oid,&oid_length,0,default_ref,sizeof(default_ref)))return 0;
+    if(!git_discover_refs(host,repository,0,0,oid,&oid_length,0,default_ref,sizeof(default_ref))){
+        print("Nao foi possivel consultar as refs remotas. Verifique host, caminho e HTTPS.\n");return 0;
+    }
     if(!default_ref[0]){
         static const char fallback[]="refs/heads/main";
         uint8_t i=0;while(fallback[i]){default_ref[i]=fallback[i];i++;}default_ref[i]=0;
     }
-    if(create_directory(directory)!=1)return 0;
-    if(!ext4_chdir(directory))return 0;
+    print("Branch selecionada: ");print(default_ref);put_char('\n');
+    int created=create_directory(directory);
+    if(created!=1){
+        if(created!=-1||!ext4_chdir(directory)){
+            print("Nao foi possivel criar o diretorio de destino.\n");return 0;
+        }
+        ext4_entry_t entries[32];int count=ext4_list(entries,32);uint8_t resumable=(count==0);
+        for(int i=0;i<count&&i<32;i++)if(streq(entries[i].name,".git-pack"))resumable=1;
+        if(!resumable){(void)ext4_chdir("..");print("O diretorio de destino ja existe e nao parece um clone incompleto.\n");return 0;}
+    }else if(!ext4_chdir(directory))return 0;
     int ok=git_fetch_pack(host,repository,default_ref,".git-pack");
     if(!ok&&streq(default_ref,"refs/heads/main"))
         ok=git_fetch_pack(host,repository,"refs/heads/master",".git-pack");
     (void)ext4_chdir("..");
+    if(!ok)print("Falha ao baixar ou instalar o pack dessa branch. Consulte `git refs` para conferir as refs anunciadas.\n");
     return ok;
 }
 
@@ -590,6 +641,8 @@ static void execute_command(char *command)
         print("  dns NOME   consulta um registro IPv4 (A)\n");
         print("  tcp IP PORT conecta e encerra uma conexao TCP\n");
         print("  https HOST [CAMINHO] busca uma pagina HTTPS\n");
+        print("  curl URL busca uma URL HTTPS e mostra o corpo\n");
+        print("  curl -o ARQUIVO URL salva o corpo HTTPS no ext4\n");
         print("  https-post HOST CAMINHO CORPO envia POST HTTPS\n");
         print("  https-save HOST CAMINHO ARQUIVO baixa corpo para ext4\n");
         print("  git refs HOST REPO lista referencias remotas\n");
@@ -731,7 +784,7 @@ static void execute_command(char *command)
             if(!host||!repository||next_argument(&cursor))print("Uso: git refs HOST REPO_PATH\n");
             else {
                 print("Referencias remotas:\n");
-                if(!git_discover_refs(host,repository,0,1,oid,&oid_length,0,0,0))print("Falha ao ler refs Git via HTTPS.\n");
+                (void)git_discover_refs(host,repository,0,1,oid,&oid_length,0,0,0);
             }
         }
     } else if (starts_with(command, "git fetch ")) {
@@ -785,6 +838,36 @@ static void execute_command(char *command)
         }
     } else if (streq(command,"git")) {
         print("Uso: git clone URL [DIRETORIO] | git refs HOST REPO_PATH | git fetch HOST REPO_PATH REF ARQUIVO_PACK\n");
+    } else if (starts_with(command, "curl ")) {
+        char *cursor=command+5,*first=next_argument(&cursor),*filename=0,*target=0;
+        if(first&&streq(first,"-o")){
+            filename=next_argument(&cursor);
+            target=next_argument(&cursor);
+        }else target=first;
+        char host[256];const char *path;uint32_t response_length=0;uint16_t status=0;
+        https_display_t display={0,0};https_file_writer_t writer={0};
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else if(!target||(filename&&!valid_file_name(filename))||next_argument(&cursor)||
+                !starts_with(target,"https://")||!parse_https_target(target,0,host,&path))
+            print("Uso: curl [-o ARQUIVO] https://HOST/CAMINHO\n");
+        else if(filename&&!disk_ready)print("Disco indisponivel.\n");
+        else if(filename&&!ext4_write_begin(filename))print("Nao foi possivel abrir o arquivo no ext4.\n");
+        else {
+            print("Conectando via HTTPS a ");print(host);print("...\n");
+            int ok=net_https_request(host,path,"GET",0,0,0,
+                filename?https_file_sink:https_display_sink,
+                filename?(void *)&writer:(void *)&display,&response_length,&status);
+            uint32_t saved=filename?https_file_finish(&writer):0;
+            if(!ok)print_https_failure();
+            else if(filename&&writer.failed)print("Download incompleto; arquivo parcial preservado.\n");
+            else if(filename){print("HTTP ");print_u32(status);print("; salvos ");print_u32(saved);print(" bytes em ");print(filename);put_char('\n');}
+            else {
+                put_char('\n');
+                if(response_length>display.shown)print("Exibidos no maximo 2048 caracteres imprimiveis.\n");
+            }
+        }
+    } else if (streq(command,"curl")) {
+        print("Uso: curl [-o ARQUIVO] https://HOST/CAMINHO\n");
     } else if (starts_with(command, "https-post ")) {
         if(!network_stack_ready)print("Rede indisponivel.\n");
         else {
@@ -798,7 +881,7 @@ static void execute_command(char *command)
                 print("Resposta HTTPS POST:\n");
                 int ok=net_https_request(host,path,"POST","Content-Type: application/x-www-form-urlencoded\r\n",
                     (const uint8_t *)cursor,(uint32_t)str_length(cursor),https_display_sink,&display,&response_length,&status);
-                if(!ok)print("Falha na requisicao HTTPS POST.\n");
+                if(!ok)print_https_failure();
                 else {print("\nHTTP ");print_u32(status);print("; corpo recebido: ");print_u32(response_length);print(" bytes.\n");
                     if(response_length>display.total)print("Resposta truncada na exibicao.\n");}
             }
@@ -817,7 +900,8 @@ static void execute_command(char *command)
             else {
                 int ok=net_https_request(host,path,"GET",0,0,0,https_file_sink,&writer,&response_length,&status);
                 uint32_t saved=https_file_finish(&writer);
-                if(!ok||writer.failed)print("Download HTTPS incompleto; arquivo parcial preservado.\n");
+                if(!ok)print_https_failure();
+                else if(writer.failed)print("Download HTTPS incompleto; arquivo parcial preservado.\n");
                 else {print("HTTP ");print_u32(status);print("; salvos ");print_u32(saved);print(" bytes em ");print(filename);put_char('\n');}
             }
         }
@@ -832,7 +916,7 @@ static void execute_command(char *command)
             }
             print("Conectando via HTTPS a ");print(host);print("...\nCorpo da resposta:\n");
             if(!net_https_request(host,path,"GET",0,0,0,https_display_sink,&display,&response_length,&status))
-                print("HTTPS falhou: DNS, TCP, certificado ou TLS nao validado.\n");
+                print_https_failure();
             else {
                 put_char('\n');print("HTTP ");print_u32(status);print("; corpo recebido: ");print_u32(response_length);print(" bytes.\n");
                 if(response_length>display.shown)print("Exibidos no maximo 2048 caracteres imprimiveis.\n");

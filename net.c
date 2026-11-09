@@ -4,7 +4,7 @@
 #define ETH_FRAME_MAX 1518u
 #define IPV4_HEADER_MIN 20u
 #define IPV4_PAYLOAD_MAX (1500u - IPV4_HEADER_MIN)
-#define TCP_MSS 1000u
+#define TCP_MSS 1460u
 #define ARP_CACHE_SIZE 8u
 #define IPV4_QUEUE_SIZE 8u
 #define ETH_TYPE_ARP 0x0806u
@@ -49,6 +49,11 @@ static struct {
 } tcp_state;
 static uint16_t tcp_port_seed=49152;
 static uint32_t tcp_sequence_seed=0x4D41494Fu;
+static int tcp_send_error;
+static int tcp_read_error;
+
+int net_tcp_last_send_error(void){return tcp_send_error;}
+int net_tcp_last_read_error(void){return tcp_read_error;}
 
 static uint16_t be16(const uint8_t *p) { return (uint16_t)p[0] << 8 | p[1]; }
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0]<<24 | (uint32_t)p[1]<<16 | (uint32_t)p[2]<<8 | p[3]; }
@@ -262,7 +267,7 @@ int net_ping(uint32_t destination)
     put_be16(request+2,checksum(request,sizeof(request)));
     if(!net_ipv4_send(destination,1,request,sizeof(request)))return -1;
 
-    for(uint32_t wait=0;wait<3000000;wait++){
+    for(uint32_t wait=0;wait<10000000;wait++){
         net_poll();
         while(net_ipv4_receive(&packet,reply,sizeof(reply))==1){
             if(packet.source!=destination||packet.protocol!=1||packet.length!=sizeof(request))continue;
@@ -446,6 +451,7 @@ void net_get_config(uint32_t *address,uint32_t *mask,uint32_t *gateway)
 uint32_t net_get_dns(void){return dns_ip;}
 
 #define TCP_HEADER_SIZE 20u
+#define TCP_ACK_WAIT_LOOPS 10000000u
 
 static uint16_t tcp_checksum(uint32_t source,uint32_t destination,const uint8_t *segment,uint16_t length)
 {
@@ -464,13 +470,15 @@ static int tcp_send_segment(uint8_t flags,const uint8_t *payload,uint16_t length
 {
     uint8_t segment[TCP_HEADER_SIZE+TCP_MSS]={0};
     if(!tcp_state.address||length>TCP_MSS||(length&&!payload))return 0;
+    uint16_t header_length=(flags&0x02)?24u:TCP_HEADER_SIZE;
     put_be16(segment,tcp_state.local_port);put_be16(segment+2,tcp_state.remote_port);
     put_be32(segment+4,tcp_state.send_sequence);put_be32(segment+8,tcp_state.receive_sequence);
-    segment[12]=0x50;segment[13]=flags;put_be16(segment+14,4096);
-    if(length)bytes_copy(segment+TCP_HEADER_SIZE,payload,length);
-    uint16_t sum=tcp_checksum(local_ip,tcp_state.address,segment,TCP_HEADER_SIZE+length);
+    segment[12]=(uint8_t)((header_length/4)<<4);segment[13]=flags;put_be16(segment+14,4096);
+    if(header_length==24){segment[20]=2;segment[21]=4;put_be16(segment+22,TCP_MSS);}
+    if(length)bytes_copy(segment+header_length,payload,length);
+    uint16_t sum=tcp_checksum(local_ip,tcp_state.address,segment,header_length+length);
     put_be16(segment+16,sum?sum:0xFFFF);
-    return net_ipv4_send(tcp_state.address,6,segment,TCP_HEADER_SIZE+length);
+    return net_ipv4_send(tcp_state.address,6,segment,header_length+length);
 }
 
 /* Returns 1 for a matching valid TCP segment, 0 while no match is queued. */
@@ -524,17 +532,19 @@ static int tcp_take_pending(uint8_t *data,uint16_t capacity,uint16_t *length)
 static int tcp_wait_ack(uint32_t expected)
 {
     uint8_t payload[TCP_MSS],flags;uint16_t length;uint32_t sequence,acknowledgment;
-    for(uint32_t wait=0;wait<3000000;wait++){
+    for(uint32_t wait=0;wait<TCP_ACK_WAIT_LOOPS;wait++){
         net_poll();
-        while(tcp_next_segment(&flags,&sequence,&acknowledgment,payload,sizeof(payload),&length)==1){
-            if(flags&0x04)return -1;
+        int next;
+        while((next=tcp_next_segment(&flags,&sequence,&acknowledgment,payload,sizeof(payload),&length))!=0){
+            if(next<0){tcp_send_error=NET_TCP_SEND_ERROR_BAD_ACK_DATA;continue;}
+            if(flags&0x04){tcp_send_error=NET_TCP_SEND_ERROR_RESET;return -1;}
             if((flags&0x08)&&acknowledgment==expected){
                 if(length||(flags&0x01)){
-                    if(!tcp_store_received(flags,sequence,payload,length))return -1;
+                    if(!tcp_store_received(flags,sequence,payload,length)){tcp_send_error=NET_TCP_SEND_ERROR_BAD_ACK_DATA;return -1;}
                 }
                 return 1;
             }
-            if(flags&0x01){tcp_state.receive_sequence=sequence+length+1;(void)tcp_send_segment(0x10,0,0);return -1;}
+            if(flags&0x01){tcp_state.receive_sequence=sequence+length+1;(void)tcp_send_segment(0x10,0,0);tcp_send_error=NET_TCP_SEND_ERROR_FIN;return -1;}
         }
     }
     return 0;
@@ -567,29 +577,37 @@ int net_tcp_connect(uint32_t destination,uint16_t port)
 
 int net_tcp_send(const uint8_t *data,uint16_t length)
 {
+    tcp_send_error=NET_TCP_SEND_ERROR_NONE;
     if(!tcp_state.connected||!data||!length||length>TCP_MSS)return 0;
-    if(!tcp_send_segment(0x18,data,length))return 0; /* PSH + ACK */
+    if(!tcp_send_segment(0x18,data,length)){tcp_send_error=NET_TCP_SEND_ERROR_FRAME;return 0;}
+    /* The TLS byte-stream writer completes when the NIC accepted the frame;
+       peer ACKs and incoming data are handled by the receive path. */
     tcp_state.send_sequence+=length;
-    return tcp_wait_ack(tcp_state.send_sequence);
+    return 1;
 }
 
 int net_tcp_receive(uint8_t *data,uint16_t capacity,uint16_t *length)
 {
-    if(!tcp_state.connected||!data||!capacity||!length)return -1;
+    tcp_read_error=NET_TCP_READ_ERROR_NONE;
+    if(!tcp_state.connected||!data||!capacity||!length){tcp_read_error=NET_TCP_READ_ERROR_RESET;return -1;}
     int pending=tcp_take_pending(data,capacity,length);
-    if(pending)return pending==1?1:0;
+    if(pending){if(pending==2)tcp_read_error=NET_TCP_READ_ERROR_FIN;return pending==1?1:0;}
     uint8_t flags,payload[TCP_MSS];uint16_t received;uint32_t sequence,acknowledgment;
-    for(uint32_t wait=0;wait<3000000;wait++){
+    for(uint32_t wait=0;wait<10000000;wait++){
         net_poll();
-        while(tcp_next_segment(&flags,&sequence,&acknowledgment,payload,
-                               capacity<TCP_MSS?capacity:TCP_MSS,&received)==1){
-            if(flags&0x04)return -1;
-            if((flags&0x10)&&sequence==tcp_state.receive_sequence&&(received||(flags&0x01)))
-                (void)tcp_store_received(flags,sequence,payload,received);
+        int next;
+        while((next=tcp_next_segment(&flags,&sequence,&acknowledgment,payload,
+                                     sizeof(payload),&received))!=0){
+            if(next<0){tcp_read_error=NET_TCP_READ_ERROR_OVERSIZE;continue;}
+            if(flags&0x04){tcp_read_error=NET_TCP_READ_ERROR_RESET;return -1;}
+            if((flags&0x10)&&(received||(flags&0x01))){
+                if(!tcp_store_received(flags,sequence,payload,received))tcp_read_error=NET_TCP_READ_ERROR_BAD_SEQUENCE;
+            }
             pending=tcp_take_pending(data,capacity,length);
-            if(pending)return pending==1?1:0;
+            if(pending){if(pending==2)tcp_read_error=NET_TCP_READ_ERROR_FIN;return pending==1?1:0;}
         }
     }
+    if(tcp_read_error==NET_TCP_READ_ERROR_NONE)tcp_read_error=NET_TCP_READ_ERROR_TIMEOUT;
     return 0;
 }
 

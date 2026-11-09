@@ -26,6 +26,16 @@ stack_top:
 .type _start, @function
 _start:
     cli
+
+    /* O BearSSL pode selecionar rotinas SSE2 após detectar os recursos da CPU. */
+    mov %cr0, %eax
+    and $~0x4, %eax             /* CR0.EM = 0 */
+    or $0x2, %eax               /* CR0.MP = 1 */
+    mov %eax, %cr0
+    mov %cr4, %eax
+    or $0x600, %eax             /* CR4.OSFXSR | CR4.OSXMMEXCPT */
+    mov %eax, %cr4
+
     mov $stack_top, %esp
     call kernel_main
 

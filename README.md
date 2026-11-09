@@ -8,7 +8,7 @@ O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
 Unicode geral para acentos.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `cd`, `pwd`,
-`mkdir`, `write`, `cat`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
+`mkdir`, `write`, `cat`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
@@ -43,6 +43,10 @@ ou delimitadas pelo fechamento da conexão. `https HOST [CAMINHO]` exibe o corpo
 `https-post HOST CAMINHO CORPO` envia formulário; `https-save HOST CAMINHO ARQUIVO`
 transfere o corpo em fluxo para o ext4, sem manter a resposta toda na RAM. A
 API também aceita um callback de destino para encaminhar os dados recebidos.
+A pilha oferece `curl https://HOST/CAMINHO` para exibir respostas GET e
+`curl -o ARQUIVO https://HOST/CAMINHO` para salvar o corpo no diretório atual do
+ext4. A implementação aceita somente HTTPS, exibe até 2048 caracteres
+imprimíveis no terminal e não implementa todas as opções do curl convencional.
 A lista de autoridades certificadoras é uma fotografia do
 repositório do sistema usado na compilação e precisa ser atualizada para manter
 a validação compatível com futuras mudanças de certificados.
