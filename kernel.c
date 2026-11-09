@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "ext4.h"
+#include "e1000.h"
+#include "net.h"
 
 #define VGA_MEMORY ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH 80
@@ -11,12 +13,67 @@ static size_t cursor_x;
 static size_t cursor_y;
 static uint8_t color = VGA_COLOR;
 static int disk_ready;
+static int network_stack_ready;
 
 static int streq(const char *left, const char *right);
 static void print(const char *text);
 static void put_char(char c);
 static char read_key(void);
 static void write_interactive(const char *name);
+
+static void print_hex_byte(uint8_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    put_char(digits[value >> 4]);
+    put_char(digits[value & 0x0F]);
+}
+
+static void print_decimal(uint8_t value)
+{
+    if (value >= 100) put_char('0' + value / 100);
+    if (value >= 10) put_char('0' + (value / 10) % 10);
+    put_char('0' + value % 10);
+}
+
+static void print_ipv4(uint32_t address)
+{
+    print_decimal((uint8_t)(address >> 24)); put_char('.');
+    print_decimal((uint8_t)(address >> 16)); put_char('.');
+    print_decimal((uint8_t)(address >> 8)); put_char('.');
+    print_decimal((uint8_t)address);
+}
+
+static int parse_ipv4(const char *text,uint32_t *address)
+{
+    uint32_t result=0;
+    for(uint8_t part=0;part<4;part++){
+        uint16_t value=0;uint8_t digits=0;
+        while(*text>='0'&&*text<='9'){
+            if(++digits>3)return 0;
+            value=value*10+(uint8_t)(*text-'0');
+            if(value>255)return 0;
+            text++;
+        }
+        if(!digits)return 0;
+        result=(result<<8)|value;
+        if(part<3){if(*text!='.')return 0;text++;}
+        else if(*text)return 0;
+    }
+    *address=result;return 1;
+}
+
+static int parse_port(const char *text,uint16_t *port)
+{
+    uint32_t value=0;uint8_t digits=0;
+    while(*text>='0'&&*text<='9'){
+        if(++digits>5)return 0;
+        value=value*10+(uint8_t)(*text-'0');
+        if(value>65535)return 0;
+        text++;
+    }
+    if(!digits||!value||*text)return 0;
+    *port=(uint16_t)value;return 1;
+}
 
 static inline uint8_t inb(uint16_t port)
 {
@@ -165,6 +222,11 @@ static void execute_command(char *command)
         print("  ls         lista arquivos e diretorios\n");
         print("  cd CAMINHO muda de diretorio (use .. para voltar)\n");
         print("  pwd        mostra o caminho atual\n");
+        print("  ifconfig   mostra a configuracao IPv4\n");
+        print("  ping [IPv4] testa ICMP (sem endereco, usa o gateway)\n");
+        print("  dhcp       solicita configuracao IPv4 automaticamente\n");
+        print("  dns NOME   consulta um registro IPv4 (A)\n");
+        print("  tcp IP PORT conecta e encerra uma conexao TCP\n");
         print("  mkdir NOME cria um diretorio no disco\n");
         print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
@@ -226,6 +288,61 @@ static void execute_command(char *command)
         char path[1100];
         if (disk_ready && ext4_pwd(path, sizeof(path))) { print(path); put_char('\n'); }
         else print("Disco indisponivel.\n");
+    } else if (streq(command, "ifconfig")) {
+        if (network_stack_ready) {
+            uint32_t address,mask,gateway;
+            net_get_config(&address,&mask,&gateway);
+            print("IPv4: ");print_ipv4(address);print("  mascara: ");print_ipv4(mask);
+            print("  gateway: ");print_ipv4(gateway);print("  DNS: ");print_ipv4(net_get_dns());put_char('\n');
+        } else print("Rede indisponivel.\n");
+    } else if (streq(command, "ping") || starts_with(command, "ping ")) {
+        if (!network_stack_ready) print("Rede indisponivel.\n");
+        else {
+            uint32_t destination,gateway;
+            net_get_config(0,0,&gateway);
+            if (streq(command,"ping")) destination=gateway;
+            else if (!parse_ipv4(command+5,&destination)) {
+                print("Uso: ping [IPv4]\n");
+                return;
+            }
+            print("PING ");print_ipv4(destination);print(" ...\n");
+            int result=net_ping(destination);
+            if(result==1){print("Resposta ICMP de ");print_ipv4(destination);print(": 32 bytes\n");}
+            else if(result==0){print("Tempo esgotado aguardando resposta.\n");}
+            else print("Falha ao enviar o pedido ICMP.\n");
+        }
+    } else if (streq(command, "dhcp")) {
+        if (!network_stack_ready) print("Rede indisponivel.\n");
+        else if (net_dhcp_configure()) print("Configuracao recebida por DHCP.\n");
+        else print("DHCP falhou; configuracao anterior mantida.\n");
+    } else if (starts_with(command, "dns ")) {
+        if (!network_stack_ready) print("Rede indisponivel.\n");
+        else {
+            uint32_t address;
+            if (net_dns_resolve(command + 4, &address)) { print(command + 4);print(" -> ");print_ipv4(address);put_char('\n'); }
+            else print("Falha na consulta DNS (registro A).\n");
+        }
+    } else if (streq(command, "dns")) {
+        print("Uso: dns NOME\n");
+    } else if (starts_with(command, "tcp ")) {
+        char *ip_text=command+4,*port_text=ip_text;
+        while(*port_text&&*port_text!=' ')port_text++;
+        if(*port_text)*port_text++='\0';
+        uint32_t address;uint16_t port;
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else if(!*port_text||!parse_ipv4(ip_text,&address)||!parse_port(port_text,&port))
+            print("Uso: tcp IP PORT (exemplo: tcp 10.0.2.2 80)\n");
+        else {
+            print("TCP conectando a ");print_ipv4(address);put_char(':');
+            put_char((char)('0'+(port/10000)%10));put_char((char)('0'+(port/1000)%10));
+            put_char((char)('0'+(port/100)%10));put_char((char)('0'+(port/10)%10));put_char((char)('0'+port%10));print(" ...\n");
+            if(net_tcp_connect(address,port)){
+                print("Handshake TCP concluido.\n");
+                if(!net_tcp_close())print("Aviso: encerramento TCP nao confirmado.\n");
+            } else print("Falha ao conectar (porta fechada ou tempo esgotado).\n");
+        }
+    } else if (streq(command, "tcp")) {
+        print("Uso: tcp IP PORT\n");
     } else if (streq(command, "halt")) {
         print("Sistema parado. Reinicie a maquina para continuar.\n");
         for (;;) __asm__ volatile ("cli; hlt");
@@ -257,6 +374,7 @@ static const char keymap[128] = {
 static char read_key(void)
 {
     for (;;) {
+        if (network_stack_ready) net_poll();
         if (inb(0x64) & 1) {
             uint8_t scan = inb(0x60);
             if (scan < 128 && keymap[scan])
@@ -326,9 +444,26 @@ void kernel_main(void)
 
     clear_screen();
     disk_ready = ext4_mount();
+    uint8_t mac[6];
+    int network_device_ready = e1000_init(mac);
+    network_stack_ready = network_device_ready;
+    if (network_stack_ready) net_init(mac);
     print("maiOs 0.1 - terminal do sistema\nDigite 'help' para ver os comandos.\n\n");
     if (disk_ready) print("Disco pronto.\n");
     else print("Imagem ext4 ausente ou com recursos nao suportados.\n");
+    if (network_device_ready) {
+        print("E1000 inicializada. MAC=");
+        for (uint8_t i = 0; i < 6; ++i) {
+            if (i) put_char(':');
+            print_hex_byte(mac[i]);
+        }
+        put_char('\n');
+        print("Solicitando configuracao DHCP...\n");
+        if (net_dhcp_configure()) print("Configuracao recebida por DHCP.\n");
+        else print("DHCP indisponivel; usando configuracao estatica 10.0.2.15/24.\n");
+    } else {
+        print("Placa E1000 nao encontrada ou falha na inicializacao.\n");
+    }
     prompt();
 
     for (;;) {

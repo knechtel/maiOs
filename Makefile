@@ -10,8 +10,8 @@ LDFLAGS = -m elf_i386 -T linker.ld
 
 all: kernel.elf
 
-kernel.elf: boot.o kernel.o ext4.o linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot.o kernel.o ext4.o
+kernel.elf: boot.o kernel.o ext4.o e1000.o net.o linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot.o kernel.o ext4.o e1000.o net.o
 
 boot.o: boot.s
 	$(AS) $(ASFLAGS) -c $< -o $@
@@ -22,6 +22,12 @@ kernel.o: kernel.c
 ext4.o: ext4.c ext4.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
+e1000.o: e1000.c e1000.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+net.o: net.c net.h e1000.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
 disk.img:
 	truncate -s 1M disk.img
 
@@ -30,7 +36,7 @@ ext4-2g.img:
 	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4-2g.img
 
 run: kernel.elf ext4-2g.img
-	qemu-system-i386 -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide
+	qemu-system-i386 -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000
 
 clean:
-	rm -f boot.o kernel.o ext4.o kernel.elf
+	rm -f boot.o kernel.o ext4.o e1000.o net.o kernel.elf

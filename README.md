@@ -19,6 +19,21 @@ a 16 níveis. A imagem criada pelo Makefile desativa journal, extents e checksum
 Sem journal, uma queda de energia durante a gravação pode corromper metadados.
 Evite montar a imagem simultaneamente no Linux e no QEMU.
 
+O QEMU conecta uma E1000 com rede de usuário. No boot, o kernel procura a placa
+PCI Intel 8086:100E, habilita acesso à memória e bus mastering, reseta o
+dispositivo e mostra o endereço MAC. O driver configura anéis TX/RX de oito
+descritores e oferece `e1000_send` e `e1000_receive` com polling. A camada de
+rede implementa ARP, cabeçalhos/checksum IPv4 e ICMP Echo (`ping`), com
+configuração estática `10.0.2.15/24` e gateway `10.0.2.2`; `ifconfig` mostra
+essa configuração e `ping` sem argumento testa o gateway. A pilha também faz
+configuração DHCP no boot (com fallback estático), transporte UDP e consulta DNS
+de registros IPv4 tipo A. Use `dhcp` para renovar a configuração, `ifconfig` para
+ver IP/máscara/gateway/DNS, e `dns exemplo.com` para resolver um nome. TCP
+implementa conexão de saída com handshake, envio/recepção de segmentos e
+encerramento para uma conexão por vez. O comando `tcp IP PORT` testa o handshake
+e fecha a conexão; suporte a servidor/listen, retransmissão avançada e múltiplas
+conexões ainda não está implementado.
+
 Exemplos:
 
 ```text
