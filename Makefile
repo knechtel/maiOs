@@ -72,7 +72,7 @@ ext4-2g.img:
 	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4-2g.img
 
 run: kernel.elf ext4-2g.img
-	qemu-system-i386 -cpu max -k pt-br -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000
+	qemu-system-i386 -cpu max -k pt-br -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070
 
 clean:
 	rm -f boot.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf

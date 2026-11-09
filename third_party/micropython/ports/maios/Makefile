@@ -12,12 +12,13 @@ CFLAGS += -m32 -march=i386 -mno-sse -mno-mmx -std=c99 -ffreestanding -fno-pie \
 
 SRC_C = \
 	port.c \
+	webserver.c \
 	shared/libc/printf.c \
 	shared/readline/readline.c \
 	shared/runtime/pyexec.c \
 	shared/runtime/stdout_helpers.c
 
-SRC_QSTR += shared/readline/readline.c shared/runtime/pyexec.c
+SRC_QSTR += shared/readline/readline.c shared/runtime/pyexec.c webserver.c
 
 OBJ += $(PY_CORE_O)
 OBJ += $(addprefix $(BUILD)/, $(SRC_C:.c=.o))

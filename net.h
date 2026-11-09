@@ -32,6 +32,7 @@ int net_udp_receive(udp_packet_t *packet, uint8_t *payload, uint16_t capacity);
 void net_get_config(uint32_t *address, uint32_t *mask, uint32_t *gateway);
 uint32_t net_get_dns(void);
 int net_tcp_connect(uint32_t destination, uint16_t port);
+int net_tcp_accept(uint16_t port);
 int net_tcp_send(const uint8_t *data, uint16_t length);
 int net_tcp_receive(uint8_t *data, uint16_t capacity, uint16_t *length);
 int net_tcp_close(void);

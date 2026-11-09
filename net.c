@@ -481,6 +481,8 @@ static int tcp_send_segment(uint8_t flags,const uint8_t *payload,uint16_t length
     return net_ipv4_send(tcp_state.address,6,segment,header_length+length);
 }
 
+static int tcp_store_received(uint8_t flags,uint32_t sequence,const uint8_t *payload,uint16_t length);
+
 /* Returns 1 for a matching valid TCP segment, 0 while no match is queued. */
 static int tcp_next_segment(uint8_t *flags,uint32_t *sequence,uint32_t *acknowledgment,
                             uint8_t *payload,uint16_t capacity,uint16_t *length)
@@ -497,6 +499,37 @@ static int tcp_next_segment(uint8_t *flags,uint32_t *sequence,uint32_t *acknowle
         *flags=data[13];*sequence=be32(data+4);*acknowledgment=be32(data+8);*length=payload_length;
         if(payload_length)bytes_copy(payload,data+header,payload_length);
         return 1;
+    }
+    return 0;
+}
+
+int net_tcp_accept(uint16_t port)
+{
+    if(!port||tcp_state.connected)return 0;
+    uint8_t data[IPV4_PAYLOAD_MAX];ipv4_packet_t ip;
+    for(uint32_t wait=0;wait<100000000u;wait++){
+        net_poll();
+        while(net_ipv4_receive(&ip,data,sizeof(data))==1){
+            if(ip.protocol!=6||ip.length<TCP_HEADER_SIZE)continue;
+            uint16_t header=(uint16_t)(data[12]>>4)*4;
+            if(header<TCP_HEADER_SIZE||header>ip.length||be16(data+2)!=port||
+               !(data[13]&0x02)||(data[13]&0x10)||tcp_checksum(ip.source,ip.destination,data,ip.length)!=0)continue;
+            tcp_state.address=ip.source;tcp_state.remote_port=be16(data);tcp_state.local_port=port;
+            tcp_state.receive_sequence=be32(data+4)+1;tcp_state.send_sequence=++tcp_sequence_seed;
+            tcp_state.pending_length=0;tcp_state.pending_fin=0;tcp_state.connected=0;
+            if(!tcp_send_segment(0x12,0,0))return 0;
+            tcp_state.send_sequence++;
+            for(uint32_t ackwait=0;ackwait<3000000u;ackwait++){
+                net_poll();uint8_t flags,payload[TCP_MSS];uint16_t length;uint32_t seq,ack;
+                int next=tcp_next_segment(&flags,&seq,&ack,payload,sizeof(payload),&length);
+                if(next==1&&(flags&0x04))return 0;
+                if(next==1&&(flags&0x10)&&ack==tcp_state.send_sequence&&seq==tcp_state.receive_sequence){
+                    if(length&&!tcp_store_received(flags,seq,payload,length))return 0;
+                    tcp_state.connected=1;return 1;
+                }
+            }
+            return 0;
+        }
     }
     return 0;
 }

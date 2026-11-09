@@ -39,6 +39,22 @@ O port usa o runtime oficial do MicroPython com compilador, REPL, coletor de
 lixo e heap de 1 MiB. Esta configuração mínima não inclui números de ponto
 flutuante, módulos externos nem importação de outros arquivos Python.
 
+O módulo `webserver` oferece um servidor HTTP sequencial. Grave como
+`server.py` e execute `python server.py`:
+
+```python
+import webserver
+
+def page(method, path):
+    return "maiOs diz ola! Voce pediu " + path
+
+webserver.serve(page)  # porta TCP 8070
+```
+
+Com `make run`, o QEMU encaminha `127.0.0.1:8070` do host para o maiOs. Acesse
+`http://127.0.0.1:8070/`. O servidor atende uma conexão por vez e limita a
+resposta a 16 KiB.
+
 O driver suporta até 256 grupos ext4 com blocos de 1024 bytes. Ele não suporta
 journal, extents, checksums ou partições. A navegação por diretórios é limitada
 a 16 níveis. A imagem criada pelo Makefile desativa journal, extents e checksums.
