@@ -8,15 +8,36 @@ O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
 Unicode geral para acentos.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `cd`, `pwd`,
-`mkdir`, `rmdir`, `rm`, `write`, `cat`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
+`mkdir`, `rmdir`, `rm`, `write`, `cat`, `python`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
+O comando `help` pagina a lista; pressione qualquer tecla para avançar ou `q`
+para sair.
 
 Para gravar várias linhas, use `write NOME`, digite o conteúdo e finalize com um
 ponto sozinho em uma linha. `cat NOME` lê os blocos do arquivo em sequência.
 Use `rm NOME` para apagar um arquivo e `rmdir NOME` para apagar um diretório
 vazio no diretório atual. Os dois comandos aceitam nomes simples, sem caminhos.
+`python` abre o REPL MicroPython; `python ARQUIVO.py` executa um script salvo no
+diretório atual. Exemplo:
+
+```text
+python
+>>> print(6 * 7)
+42
+```
+
+Pressione `Ctrl+D` para voltar ao shell. Para executar um arquivo:
+
+```text
+write exemplo.py print("oi do maiOs")
+python exemplo.py
+```
+
+O port usa o runtime oficial do MicroPython com compilador, REPL, coletor de
+lixo e heap de 1 MiB. Esta configuração mínima não inclui números de ponto
+flutuante, módulos externos nem importação de outros arquivos Python.
 
 O driver suporta até 256 grupos ext4 com blocos de 1024 bytes. Ele não suporta
 journal, extents, checksums ou partições. A navegação por diretórios é limitada
@@ -86,6 +107,7 @@ cd ..
 - GCC com suporte a compilação `-m32`
 - GNU `ld`, `make` e `qemu-system-i386`
 - `mke2fs` (pacote e2fsprogs), para criar `ext4-2g.img`
+- `python3`, para gerar as tabelas do runtime MicroPython
 
 ## Compilar e executar
 

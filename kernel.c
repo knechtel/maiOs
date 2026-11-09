@@ -4,6 +4,7 @@
 #include "e1000.h"
 #include "net.h"
 #include "gitpack.h"
+#include "micropython_port.h"
 
 #define VGA_MEMORY ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH 80
@@ -21,6 +22,11 @@ static void print(const char *text);
 static void put_char(char c);
 static char read_key(void);
 static void write_interactive(const char *name);
+
+int maios_python_read_char(void);
+void maios_python_write_char(char value);
+void maios_python_move_cursor_back(unsigned int count);
+void maios_python_erase_line_from_cursor(unsigned int count);
 
 static void print_hex_byte(uint8_t value)
 {
@@ -180,6 +186,33 @@ static void put_char(char c)
     }
     if (cursor_y >= VGA_HEIGHT)
         scroll_screen();
+}
+
+int maios_python_read_char(void)
+{
+    return read_key();
+}
+
+void maios_python_write_char(char value)
+{
+    put_char(value);
+}
+
+void maios_python_move_cursor_back(unsigned int count)
+{
+    while(count--){
+        if(cursor_x)cursor_x--;
+        else if(cursor_y){cursor_y--;cursor_x=VGA_WIDTH-1;}
+    }
+}
+
+void maios_python_erase_line_from_cursor(unsigned int count)
+{
+    size_t x=cursor_x,y=cursor_y;
+    while(count--&&y<VGA_HEIGHT){
+        VGA_MEMORY[y*VGA_WIDTH+x]=(uint16_t)((color<<8)|' ');
+        if(++x==VGA_WIDTH){x=0;y++;}
+    }
 }
 
 static void print(const char *text)
@@ -622,39 +655,59 @@ static int git_clone_repo(const char *host,const char *repository,const char *di
     return ok;
 }
 
+static void show_help(void)
+{
+    static const char *const lines[]={
+        "Comandos disponiveis:",
+        "  help       mostra esta ajuda",
+        "  clear      limpa a tela",
+        "  echo TEXTO escreve uma mensagem",
+        "  about      informacoes do sistema",
+        "  ls         lista arquivos e diretorios",
+        "  cd CAMINHO muda de diretorio (use .. para voltar)",
+        "  pwd        mostra o caminho atual",
+        "  ifconfig   mostra a configuracao IPv4",
+        "  ping [IPv4] testa ICMP (sem endereco, usa o gateway)",
+        "  dhcp       solicita configuracao IPv4 automaticamente",
+        "  dns NOME   consulta um registro IPv4 (A)",
+        "  tcp IP PORT conecta e encerra uma conexao TCP",
+        "  https HOST [CAMINHO] busca uma pagina HTTPS",
+        "  curl URL busca uma URL HTTPS e mostra o corpo",
+        "  curl -o ARQUIVO URL salva o corpo HTTPS no ext4",
+        "  https-post HOST CAMINHO CORPO envia POST HTTPS",
+        "  https-save HOST CAMINHO ARQUIVO baixa corpo para ext4",
+        "  git refs HOST REPO lista referencias remotas",
+        "  git fetch HOST REPO REF ARQUIVO recebe o pack e faz checkout",
+        "  git clone URL [DIRETORIO] clona um repositorio",
+        "  mkdir NOME cria um diretorio no disco",
+        "  rm NOME    apaga um arquivo",
+        "  rmdir NOME apaga um diretorio vazio",
+        "  python     inicia o REPL MicroPython",
+        "  python ARQUIVO.py executa um script do ext4",
+        "  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa",
+        "  cat NOME   mostra um arquivo do disco",
+        "  halt       para a CPU",
+        "  reboot     reinicia a maquina"
+    };
+    const size_t count=sizeof(lines)/sizeof(lines[0]);
+    uint8_t page_lines=0;
+    for(size_t i=0;i<count;i++){
+        print(lines[i]);put_char('\n');page_lines++;
+        if(page_lines==18&&i+1<count){
+            print("-- Mais -- (tecla para continuar, q para sair)\n");
+            char key=read_key();
+            if(key=='q'||key=='Q')break;
+            clear_screen();page_lines=0;
+        }
+    }
+}
+
 static void execute_command(char *command)
 {
     if (*command == '\0') return;
 
     if (streq(command, "help")) {
-        print("Comandos disponiveis:\n");
-        print("  help       mostra esta ajuda\n");
-        print("  clear      limpa a tela\n");
-        print("  echo TEXTO escreve uma mensagem\n");
-        print("  about      informacoes do sistema\n");
-        print("  ls         lista arquivos e diretorios\n");
-        print("  cd CAMINHO muda de diretorio (use .. para voltar)\n");
-        print("  pwd        mostra o caminho atual\n");
-        print("  ifconfig   mostra a configuracao IPv4\n");
-        print("  ping [IPv4] testa ICMP (sem endereco, usa o gateway)\n");
-        print("  dhcp       solicita configuracao IPv4 automaticamente\n");
-        print("  dns NOME   consulta um registro IPv4 (A)\n");
-        print("  tcp IP PORT conecta e encerra uma conexao TCP\n");
-        print("  https HOST [CAMINHO] busca uma pagina HTTPS\n");
-        print("  curl URL busca uma URL HTTPS e mostra o corpo\n");
-        print("  curl -o ARQUIVO URL salva o corpo HTTPS no ext4\n");
-        print("  https-post HOST CAMINHO CORPO envia POST HTTPS\n");
-        print("  https-save HOST CAMINHO ARQUIVO baixa corpo para ext4\n");
-        print("  git refs HOST REPO lista referencias remotas\n");
-        print("  git fetch HOST REPO REF ARQUIVO recebe o pack e faz checkout\n");
-        print("  git clone URL [DIRETORIO] clona um repositorio\n");
-        print("  mkdir NOME cria um diretorio no disco\n");
-        print("  rm NOME    apaga um arquivo\n");
-        print("  rmdir NOME apaga um diretorio vazio\n");
-        print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
-        print("  cat NOME   mostra um arquivo do disco\n");
-        print("  halt       para a CPU\n");
-        print("  reboot     reinicia a maquina\n");
+        show_help();
     } else if (streq(command, "clear")) {
         clear_screen();
     } else if (starts_with(command, "echo ")) {
@@ -664,6 +717,13 @@ static void execute_command(char *command)
         put_char('\n');
     } else if (streq(command, "about")) {
         print("maiOs - kernel experimental de 32 bits\nExecutando no modo protegido x86.\n");
+    } else if (streq(command,"python")) {
+        maios_python_repl();
+    } else if (starts_with(command,"python ")) {
+        const char *filename=command+7;
+        if(!disk_ready)print("Disco indisponivel.\n");
+        else if(!valid_file_name(filename))print("Uso: python ARQUIVO.py (arquivo no diretorio atual).\n");
+        else if(!maios_python_run_file(filename))print("Nao foi possivel carregar ou executar o script Python.\n");
     } else if (starts_with(command, "mkdir ")) {
         int result = disk_ready ? create_directory(command + 6) : -4;
         if (result == 1)
@@ -985,7 +1045,7 @@ static const char altgr_keymap[128] = {
 
 static char read_key(void)
 {
-    static uint8_t left_shift, right_shift, altgr, caps_lock, extended;
+    static uint8_t left_shift, right_shift, left_control, right_control, altgr, caps_lock, extended;
     for (;;) {
         if (network_stack_ready) net_poll();
         if (inb(0x64) & 1) {
@@ -997,6 +1057,8 @@ static char read_key(void)
             uint8_t code = scan & 0x7F;
             if (!is_extended && code == 0x2A) { left_shift = !released; continue; }
             if (!is_extended && code == 0x36) { right_shift = !released; continue; }
+            if (!is_extended && code == 0x1D) { left_control = !released; continue; }
+            if (is_extended && code == 0x1D) { right_control = !released; continue; }
             if (is_extended && code == 0x38) { altgr = !released; continue; }
             if (!is_extended && code == 0x3A && !released) { caps_lock = !caps_lock; continue; }
             if (released || is_extended) continue;
@@ -1006,6 +1068,10 @@ static char read_key(void)
             else if (value >= 'a' && value <= 'z') {
                 if (shifted != caps_lock) value -= 'a' - 'A';
             } else if (shifted && shift_keymap[code]) value = shift_keymap[code];
+            if ((left_control || right_control) && value >= 'a' && value <= 'z')
+                value=(char)(value-'a'+1);
+            else if ((left_control || right_control) && value >= 'A' && value <= 'Z')
+                value=(char)(value-'A'+1);
             if (value) return value;
         }
         __asm__ volatile ("pause");
