@@ -35,7 +35,13 @@ ver IP/máscara/gateway/DNS, e `dns exemplo.com` para resolver um nome. TCP
 implementa conexão de saída com handshake, envio/recepção de segmentos e
 encerramento para uma conexão por vez. O comando `tcp IP PORT` testa o handshake
 e fecha a conexão; suporte a servidor/listen, retransmissão avançada e múltiplas
-conexões ainda não está implementado.
+conexões ainda não está implementado. HTTPS usa BearSSL 0.6, valida certificados
+contra raízes incluídas no kernel e lê a data do RTC. `make run` ativa RDRAND
+no CPU virtual do QEMU para semear o TLS. Use `https HOST [CAMINHO]` para buscar
+e exibir uma resposta HTTP segura (até 2047 bytes), por exemplo `https
+google.com.br /`. A lista de autoridades certificadoras é uma fotografia do
+repositório do sistema usado na compilação e precisa ser atualizada para manter
+a validação compatível com futuras mudanças de certificados.
 
 Exemplos:
 

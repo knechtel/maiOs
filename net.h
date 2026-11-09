@@ -35,5 +35,7 @@ int net_tcp_connect(uint32_t destination, uint16_t port);
 int net_tcp_send(const uint8_t *data, uint16_t length);
 int net_tcp_receive(uint8_t *data, uint16_t capacity, uint16_t *length);
 int net_tcp_close(void);
+int net_https_get(const char *host, const char *path, uint8_t *response,
+                  uint16_t capacity, uint16_t *response_length);
 
 #endif

@@ -1,1 +1,6 @@
 *.img
+/build/
+/libbearssl-maios.a
+/freestanding.o
+/https.o
+/https_roots.o

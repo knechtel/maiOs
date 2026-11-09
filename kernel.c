@@ -227,6 +227,7 @@ static void execute_command(char *command)
         print("  dhcp       solicita configuracao IPv4 automaticamente\n");
         print("  dns NOME   consulta um registro IPv4 (A)\n");
         print("  tcp IP PORT conecta e encerra uma conexao TCP\n");
+        print("  https HOST [CAMINHO] busca uma pagina HTTPS\n");
         print("  mkdir NOME cria um diretorio no disco\n");
         print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
@@ -355,6 +356,34 @@ static void execute_command(char *command)
         }
     } else if (streq(command, "tcp")) {
         print("Uso: tcp IP PORT\n");
+    } else if (starts_with(command, "https ")) {
+        if(!network_stack_ready){print("Rede indisponivel.\n");}
+        else {
+            char *input_host=command+6,*path="/";
+            char host[256];uint16_t host_length=0;
+            if(starts_with(input_host,"https://"))input_host+=8;
+            char *separator=input_host;
+            while(*separator&&*separator!='/')separator++;
+            while(input_host+host_length<separator&&host_length<sizeof(host)-1){host[host_length]=input_host[host_length];host_length++;}
+            host[host_length]='\0';
+            if(*separator)path=separator;
+            uint8_t response[2048];uint16_t response_length=0;
+            if(input_host+host_length<separator){print("Nome do host muito longo.\n");return;}
+            print("Conectando via HTTPS a ");print(host);print("...\n");
+            if(!net_https_get(host,path,response,sizeof(response),&response_length))
+                print("HTTPS falhou: DNS, TCP, certificado ou TLS nao validado.\n");
+            else {
+                print("Resposta HTTPS (ate 2047 bytes):\n");
+                for(uint16_t i=0;i<response_length;i++){
+                    uint8_t ch=response[i];
+                    if(ch=='\r')continue;
+                    if(ch=='\n'||ch=='\t'||(ch>=0x20&&ch<0x7F))put_char((char)ch);
+                }
+                if(!response_length||response[response_length-1]!='\n')put_char('\n');
+            }
+        }
+    } else if (streq(command, "https")) {
+        print("Uso: https HOST [CAMINHO] (exemplo: https google.com.br /)\n");
     } else if (streq(command, "halt")) {
         print("Sistema parado. Reinicie a maquina para continuar.\n");
         for (;;) __asm__ volatile ("cli; hlt");
