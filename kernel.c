@@ -35,6 +35,18 @@ static void print_decimal(uint8_t value)
     put_char('0' + value % 10);
 }
 
+static void print_u32(uint32_t value)
+{
+    char digits[10];uint8_t count=0;
+    do{digits[count++]=(char)('0'+value%10);value/=10;}while(value);
+    while(count)put_char(digits[--count]);
+}
+
+static size_t str_length(const char *text)
+{
+    size_t length=0;while(text[length])length++;return length;
+}
+
 static void print_ipv4(uint32_t address)
 {
     print_decimal((uint8_t)(address >> 24)); put_char('.');
@@ -209,6 +221,81 @@ static void reboot(void)
     for (;;) __asm__ volatile ("hlt");
 }
 
+static char *next_argument(char **cursor)
+{
+    while(**cursor==' ')++*cursor;
+    if(!**cursor)return 0;
+    char *argument=*cursor;
+    while(**cursor&&**cursor!=' ')++*cursor;
+    if(**cursor){**cursor='\0';++*cursor;}
+    return argument;
+}
+
+static int parse_https_target(char *target,char *separate_path,char host[256],const char **path)
+{
+    if(!target||!*target)return 0;
+    if(starts_with(target,"https://"))target+=8;
+    char *embedded_path=target;
+    while(*embedded_path&&*embedded_path!='/')embedded_path++;
+    uint16_t length=(uint16_t)(embedded_path-target);
+    if(!length||length>253)return 0;
+    for(uint16_t i=0;i<length;i++)host[i]=target[i];
+    host[length]='\0';
+    *path=separate_path&&*separate_path?separate_path:(*embedded_path?embedded_path:"/");
+    return 1;
+}
+
+typedef struct {uint32_t total;uint16_t shown;} https_display_t;
+static int https_display_sink(const uint8_t *data,uint16_t length,void *context)
+{
+    https_display_t *display=context;
+    for(uint16_t i=0;i<length;i++){
+        uint8_t ch=data[i];
+        if(display->shown<2048){
+            if(ch=='\r'){}
+            else if(ch=='\n'){put_char('\n');display->shown++;}
+            else if(ch=='\t'){put_char(' ');display->shown++;}
+            else if(ch>=0x20&&ch<0x7F){put_char((char)ch);display->shown++;}
+        }
+    }
+    display->total+=length;
+    return 1;
+}
+
+typedef struct {
+    uint8_t block[1024];
+    uint16_t used;
+    uint32_t block_index;
+    uint32_t total;
+    uint8_t failed;
+} https_file_writer_t;
+
+static int https_file_sink(const uint8_t *data,uint16_t length,void *context)
+{
+    https_file_writer_t *writer=context;
+    if(writer->total>0x7FFFFFFFu-length){writer->failed=1;return 0;}
+    for(uint16_t i=0;i<length;i++){
+        writer->block[writer->used++]=data[i];
+        if(writer->used==sizeof(writer->block)){
+            if(!ext4_write_block(writer->block_index,writer->block,sizeof(writer->block))){writer->failed=1;return 0;}
+            writer->block_index++;writer->used=0;
+        }
+    }
+    writer->total+=length;return 1;
+}
+
+static uint32_t https_file_finish(https_file_writer_t *writer)
+{
+    uint32_t size=writer->block_index*1024u;
+    if(writer->used&&!writer->failed){
+        if(ext4_write_block(writer->block_index,writer->block,writer->used))size+=writer->used;
+        else writer->failed=1;
+    }
+    if(!writer->failed)size=writer->total;
+    (void)ext4_write_finish(size);
+    return size;
+}
+
 static void execute_command(char *command)
 {
     if (*command == '\0') return;
@@ -228,6 +315,8 @@ static void execute_command(char *command)
         print("  dns NOME   consulta um registro IPv4 (A)\n");
         print("  tcp IP PORT conecta e encerra uma conexao TCP\n");
         print("  https HOST [CAMINHO] busca uma pagina HTTPS\n");
+        print("  https-post HOST CAMINHO CORPO envia POST HTTPS\n");
+        print("  https-save HOST CAMINHO ARQUIVO baixa corpo para ext4\n");
         print("  mkdir NOME cria um diretorio no disco\n");
         print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
@@ -356,30 +445,57 @@ static void execute_command(char *command)
         }
     } else if (streq(command, "tcp")) {
         print("Uso: tcp IP PORT\n");
-    } else if (starts_with(command, "https ")) {
-        if(!network_stack_ready){print("Rede indisponivel.\n");}
+    } else if (starts_with(command, "https-post ")) {
+        if(!network_stack_ready)print("Rede indisponivel.\n");
         else {
-            char *input_host=command+6,*path="/";
-            char host[256];uint16_t host_length=0;
-            if(starts_with(input_host,"https://"))input_host+=8;
-            char *separator=input_host;
-            while(*separator&&*separator!='/')separator++;
-            while(input_host+host_length<separator&&host_length<sizeof(host)-1){host[host_length]=input_host[host_length];host_length++;}
-            host[host_length]='\0';
-            if(*separator)path=separator;
-            uint8_t response[2048];uint16_t response_length=0;
-            if(input_host+host_length<separator){print("Nome do host muito longo.\n");return;}
-            print("Conectando via HTTPS a ");print(host);print("...\n");
-            if(!net_https_get(host,path,response,sizeof(response),&response_length))
+            char *cursor=command+11,*target=next_argument(&cursor),*path_arg=next_argument(&cursor);
+            while(*cursor==' ')cursor++;
+            char host[256];const char *path;uint32_t response_length=0;uint16_t status=0;
+            https_display_t display={0,0};
+            if(!target||!path_arg||!*cursor||!parse_https_target(target,path_arg,host,&path))
+                print("Uso: https-post HOST CAMINHO CORPO\n");
+            else {
+                print("Resposta HTTPS POST:\n");
+                int ok=net_https_request(host,path,"POST","Content-Type: application/x-www-form-urlencoded\r\n",
+                    (const uint8_t *)cursor,(uint32_t)str_length(cursor),https_display_sink,&display,&response_length,&status);
+                if(!ok)print("Falha na requisicao HTTPS POST.\n");
+                else {print("\nHTTP ");print_u32(status);print("; corpo recebido: ");print_u32(response_length);print(" bytes.\n");
+                    if(response_length>display.total)print("Resposta truncada na exibicao.\n");}
+            }
+        }
+    } else if (starts_with(command, "https-save ")) {
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else if(!disk_ready)print("Disco indisponivel.\n");
+        else {
+            char *cursor=command+11,*target=next_argument(&cursor),*path_arg=next_argument(&cursor),*filename=next_argument(&cursor);
+            char host[256];const char *path;uint32_t response_length=0;uint16_t status=0;
+            https_file_writer_t writer={0};
+            if(!target||!path_arg||!filename||next_argument(&cursor)||!valid_file_name(filename)||
+               !parse_https_target(target,path_arg,host,&path))
+                print("Uso: https-save HOST CAMINHO ARQUIVO\n");
+            else if(!ext4_write_begin(filename))print("Nao foi possivel abrir o arquivo no ext4.\n");
+            else {
+                int ok=net_https_request(host,path,"GET",0,0,0,https_file_sink,&writer,&response_length,&status);
+                uint32_t saved=https_file_finish(&writer);
+                if(!ok||writer.failed)print("Download HTTPS incompleto; arquivo parcial preservado.\n");
+                else {print("HTTP ");print_u32(status);print("; salvos ");print_u32(saved);print(" bytes em ");print(filename);put_char('\n');}
+            }
+        }
+    } else if (starts_with(command, "https ")) {
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else {
+            char *cursor=command+6,*target=next_argument(&cursor),*path_arg=next_argument(&cursor);
+            char host[256];const char *path;uint32_t response_length=0;uint16_t status=0;
+            https_display_t display={0,0};
+            if(!target||next_argument(&cursor)||!parse_https_target(target,path_arg,host,&path)){
+                print("Uso: https HOST [CAMINHO]\n");return;
+            }
+            print("Conectando via HTTPS a ");print(host);print("...\nCorpo da resposta:\n");
+            if(!net_https_request(host,path,"GET",0,0,0,https_display_sink,&display,&response_length,&status))
                 print("HTTPS falhou: DNS, TCP, certificado ou TLS nao validado.\n");
             else {
-                print("Resposta HTTPS (ate 2047 bytes):\n");
-                for(uint16_t i=0;i<response_length;i++){
-                    uint8_t ch=response[i];
-                    if(ch=='\r')continue;
-                    if(ch=='\n'||ch=='\t'||(ch>=0x20&&ch<0x7F))put_char((char)ch);
-                }
-                if(!response_length||response[response_length-1]!='\n')put_char('\n');
+                put_char('\n');print("HTTP ");print_u32(status);print("; corpo recebido: ");print_u32(response_length);print(" bytes.\n");
+                if(response_length>display.shown)print("Exibidos no maximo 2048 caracteres imprimiveis.\n");
             }
         }
     } else if (streq(command, "https")) {

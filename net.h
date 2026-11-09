@@ -35,6 +35,11 @@ int net_tcp_connect(uint32_t destination, uint16_t port);
 int net_tcp_send(const uint8_t *data, uint16_t length);
 int net_tcp_receive(uint8_t *data, uint16_t capacity, uint16_t *length);
 int net_tcp_close(void);
+typedef int (*net_https_sink_fn)(const uint8_t *data, uint16_t length, void *context);
+int net_https_request(const char *host, const char *path, const char *method,
+                      const char *headers, const uint8_t *body, uint32_t body_length,
+                      net_https_sink_fn sink, void *context,
+                      uint32_t *response_length, uint16_t *status_code);
 int net_https_get(const char *host, const char *path, uint8_t *response,
                   uint16_t capacity, uint16_t *response_length);
 
