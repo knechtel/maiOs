@@ -25,12 +25,12 @@ ext4.o: ext4.c ext4.h
 disk.img:
 	truncate -s 1M disk.img
 
-ext4.img:
-	truncate -s 8M ext4.img
-	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4.img
+ext4-2g.img:
+	truncate -s 2G ext4-2g.img
+	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4-2g.img
 
-run: kernel.elf ext4.img
-	qemu-system-i386 -kernel kernel.elf -drive file=ext4.img,format=raw,if=ide
+run: kernel.elf ext4-2g.img
+	qemu-system-i386 -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide
 
 clean:
 	rm -f boot.o kernel.o ext4.o kernel.elf

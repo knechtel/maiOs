@@ -11,6 +11,8 @@ typedef struct {
 
 int ext4_mount(void);
 int ext4_list(ext4_entry_t *entries, size_t capacity);
+int ext4_chdir(const char *path);
+int ext4_pwd(char *buffer, size_t capacity);
 int ext4_read_start(const char *name, uint32_t *size);
 int ext4_read_block(uint32_t index, uint8_t *data);
 void ext4_read_end(void);

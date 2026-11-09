@@ -163,7 +163,8 @@ static void execute_command(char *command)
         print("  echo TEXTO escreve uma mensagem\n");
         print("  about      informacoes do sistema\n");
         print("  ls         lista arquivos e diretorios\n");
-        print("  pwd        mostra o diretorio atual\n");
+        print("  cd CAMINHO muda de diretorio (use .. para voltar)\n");
+        print("  pwd        mostra o caminho atual\n");
         print("  mkdir NOME cria um diretorio no disco\n");
         print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
@@ -216,8 +217,15 @@ static void execute_command(char *command)
     } else if (starts_with(command, "cat ")) {
         if (!disk_ready) print("Disco indisponivel.\n");
         else show_file(command + 4);
+    } else if (starts_with(command, "cd ")) {
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!ext4_chdir(command + 3)) print("Diretorio nao encontrado ou caminho profundo demais.\n");
+    } else if (streq(command, "cd")) {
+        print("Uso: cd CAMINHO (use / para raiz e .. para voltar).\n");
     } else if (streq(command, "pwd")) {
-        print("/\n");
+        char path[1100];
+        if (disk_ready && ext4_pwd(path, sizeof(path))) { print(path); put_char('\n'); }
+        else print("Disco indisponivel.\n");
     } else if (streq(command, "halt")) {
         print("Sistema parado. Reinicie a maquina para continuar.\n");
         for (;;) __asm__ volatile ("cli; hlt");
