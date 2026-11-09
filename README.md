@@ -46,6 +46,22 @@ API também aceita um callback de destino para encaminhar os dados recebidos.
 A lista de autoridades certificadoras é uma fotografia do
 repositório do sistema usado na compilação e precisa ser atualizada para manter
 a validação compatível com futuras mudanças de certificados.
+O cliente Git implementa descoberta HTTP, leitura de packs, descompressão,
+verificação SHA-1, resolução de deltas e checkout. `git clone URL [DIRETORIO]`
+descobre a branch padrão anunciada pelo servidor, cria o diretório, instala os
+objetos e grava o checkout e metadados básicos em `.git`. O pack recebido fica
+no arquivo oculto `.git-pack` dentro do clone. `git refs` lista referências e
+`git fetch HOST REPO_PATH REF ARQUIVO_PACK` baixa um pack e atualiza o checkout
+no diretório atual. Exemplo:
+
+```text
+git clone https://github.com/knechtel/read-text.git
+git refs github.com /DONO/REPO.git
+git fetch github.com /DONO/REPO.git refs/heads/main repo.pack
+```
+
+O suporte atual limita packs a 2048 objetos e objetos individuais a 4 MiB;
+refs de tags anotadas e repositórios que usam SHA-256 ainda não são suportados.
 
 Exemplos:
 

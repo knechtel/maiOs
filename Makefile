@@ -17,14 +17,17 @@ BEARSSL_OBJECTS := $(patsubst third_party/bearssl/src/%.c,build/bearssl/%.o,$(BE
 
 all: kernel.elf
 
-kernel.elf: boot.o kernel.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot.o kernel.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a
+kernel.elf: boot.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a
 
 boot.o: boot.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
 kernel.o: kernel.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+gitpack.o: gitpack.c gitpack.h ext4.h third_party/bearssl/inc/bearssl.h
+	$(CC) $(CFLAGS) -Ithird_party/bearssl/port -Ithird_party/bearssl/inc -c $< -o $@
 
 ext4.o: ext4.c ext4.h
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -62,5 +65,5 @@ run: kernel.elf ext4-2g.img
 	qemu-system-i386 -cpu max -k pt-br -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000
 
 clean:
-	rm -f boot.o kernel.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf
+	rm -f boot.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf
 	rm -rf build/bearssl

@@ -3,6 +3,7 @@
 #include "ext4.h"
 #include "e1000.h"
 #include "net.h"
+#include "gitpack.h"
 
 #define VGA_MEMORY ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH 80
@@ -296,6 +297,280 @@ static uint32_t https_file_finish(https_file_writer_t *writer)
     return size;
 }
 
+typedef struct {
+    uint8_t prefix[4];
+    uint8_t prefix_length;
+    uint16_t packet_left;
+    char line[512];
+    uint16_t line_length;
+    char requested[128];
+    char oid[65];
+    char default_ref[128];
+    uint8_t oid_length;
+    uint8_t found;
+    uint8_t malformed;
+    uint8_t saw_flush;
+    uint8_t side_band_64k;
+    uint8_t list_refs;
+} git_refs_state_t;
+
+static int git_hex_value(uint8_t c)
+{
+    if(c>='0'&&c<='9')return c-'0';
+    if(c>='a'&&c<='f')return c-'a'+10;
+    if(c>='A'&&c<='F')return c-'A'+10;
+    return -1;
+}
+
+static int git_parse_packet_length(const uint8_t prefix[4])
+{
+    int value=0;
+    for(uint8_t i=0;i<4;i++){int digit=git_hex_value(prefix[i]);if(digit<0)return -1;value=(value<<4)|digit;}
+    return value;
+}
+
+static void git_print_oid(const char *oid,uint8_t length)
+{
+    for(uint8_t i=0;i<length;i++)put_char(oid[i]);
+}
+
+static int git_oid_valid(const char *text,uint8_t length)
+{
+    if(length!=40&&length!=64)return 0;
+    for(uint8_t i=0;i<length;i++)if(git_hex_value((uint8_t)text[i])<0)return 0;
+    return 1;
+}
+
+static int git_has_capability(const char *text,uint16_t length,const char *capability)
+{
+    uint16_t cap_length=0;while(capability[cap_length])cap_length++;
+    for(uint16_t i=0;i+cap_length<=length;i++){
+        if(i&&text[i-1]!=' ')continue;
+        uint16_t j=0;while(j<cap_length&&text[i+j]==capability[j])j++;
+        if(j==cap_length&&(i+j==length||text[i+j]==' '))return 1;
+    }
+    return 0;
+}
+
+static int git_ref_matches(const char *requested,const char *name)
+{
+    if(!requested[0])return 0;
+    uint16_t i=0;while(requested[i]&&name[i]&&requested[i]==name[i])i++;
+    if(!requested[i]&&!name[i])return 1;
+    if(!requested[i]&&(!name[i]||(name[0]=='r'&&name[1]=='e'&&name[2]=='f'&&name[3]=='s'&&name[4]=='/'))){
+        const char *short_name=name;
+        if(starts_with(short_name,"refs/heads/"))short_name+=11;
+        else if(starts_with(short_name,"refs/tags/"))short_name+=10;
+        i=0;while(requested[i]&&short_name[i]&&requested[i]==short_name[i])i++;
+        if(!requested[i]&&!short_name[i])return 1;
+    }
+    return 0;
+}
+
+static void git_process_ref_line(git_refs_state_t *state)
+{
+    state->line[state->line_length]=0;
+    char *line=state->line;
+    while(*line=='\n'||*line=='\r')line++;
+    if(starts_with(line,"# service=")||!line[0]){state->line_length=0;return;}
+    uint8_t oid_length=0;while(line[oid_length]&&line[oid_length]!=' '&&oid_length<65)oid_length++;
+    if(!line[oid_length]||line[oid_length]!=' '||!git_oid_valid(line,oid_length)){state->line_length=0;return;}
+    char *name=line+oid_length+1;uint16_t name_length=0;
+    while(name[name_length]&&name[name_length]!='\n'&&name[name_length]!='\r'&&name[name_length]!='\0')name_length++;
+    uint16_t caps_offset=(uint16_t)(oid_length+1+name_length);
+    if(caps_offset<state->line_length&&line[caps_offset]=='\0'&&
+       caps_offset+1<state->line_length){
+        const char *caps=line+caps_offset+1;uint16_t caps_length=(uint16_t)(state->line_length-caps_offset-1);
+        if(git_has_capability(caps,caps_length,"side-band-64k"))state->side_band_64k=1;
+        static const char symref[]="symref=HEAD:";
+        for(uint16_t i=0;i+sizeof(symref)-1<=caps_length;i++){
+            if(i&&caps[i-1]!=' ')continue;
+            uint8_t match=1;for(uint8_t j=0;j<sizeof(symref)-1;j++)if(caps[i+j]!=symref[j])match=0;
+            if(!match)continue;
+            uint16_t begin=(uint16_t)(i+sizeof(symref)-1),end=begin;
+            while(end<caps_length&&caps[end]!=' '&&caps[end]!='\0')end++;
+            if(end>begin&&end-begin<sizeof(state->default_ref)){
+                uint16_t n=0;while(begin+n<end){state->default_ref[n]=caps[begin+n];n++;}state->default_ref[n]=0;
+            }
+            break;
+        }
+    }
+    name[name_length]=0;
+    if(!name_length||starts_with(name,"^{}")){state->line_length=0;return;}
+    if(state->list_refs){git_print_oid(line,oid_length);put_char(' ');print(name);put_char('\n');}
+    if(!state->found&&git_ref_matches(state->requested,name)){
+        for(uint8_t i=0;i<oid_length;i++)state->oid[i]=line[i];
+        state->oid[oid_length]=0;state->oid_length=oid_length;state->found=1;
+    }
+    state->line_length=0;
+}
+
+static int git_refs_sink(const uint8_t *data,uint16_t length,void *context)
+{
+    git_refs_state_t *state=context;
+    for(uint16_t i=0;i<length;i++){
+        if(state->packet_left){
+            uint8_t c=data[i];state->packet_left--;
+            if(c=='\n')git_process_ref_line(state);
+            else if((uint32_t)state->line_length+1u<sizeof(state->line))state->line[state->line_length++]=(char)c;
+            else state->malformed=1;
+            if(state->packet_left==0&&state->line_length)git_process_ref_line(state);
+            continue;
+        }
+        state->prefix[state->prefix_length++]=data[i];
+        if(state->prefix_length==4){
+            int packet_length=git_parse_packet_length(state->prefix);state->prefix_length=0;
+            if(packet_length<0){state->malformed=1;return 0;}
+            if(packet_length==0){state->saw_flush=1;state->line_length=0;continue;}
+            if(packet_length==1||packet_length==2)continue;
+            if(packet_length<4){state->malformed=1;return 0;}
+            state->packet_left=(uint16_t)(packet_length-4);state->line_length=0;
+        }
+    }
+    return !state->malformed;
+}
+
+static int git_endpoint(char *buffer,uint16_t capacity,const char *repository,const char *suffix)
+{
+    uint16_t used=0;
+    if(!repository||repository[0]!='/')return 0;
+    while(*repository){if(used+1>=capacity)return 0;buffer[used++]=*repository++;}
+    while(used>1&&buffer[used-1]=='/')used--;
+    while(*suffix){if(used+1>=capacity)return 0;buffer[used++]=*suffix++;}
+    buffer[used]=0;return 1;
+}
+
+static int git_discover_refs(const char *host,const char *repository,const char *requested,
+                             uint8_t list_refs,char oid[65],uint8_t *oid_length,uint8_t *side_band_64k,
+                             char *default_ref,uint16_t default_ref_capacity)
+{
+    char endpoint[512];git_refs_state_t state={0};
+    if(!git_endpoint(endpoint,sizeof(endpoint),repository,"/info/refs?service=git-upload-pack"))return 0;
+    state.list_refs=list_refs;
+    if(requested){uint16_t i=0;while(requested[i]&&i<sizeof(state.requested)-1){state.requested[i]=requested[i];i++;}if(requested[i])return 0;state.requested[i]=0;}
+    uint32_t response_length=0;uint16_t status=0;
+    int ok=net_https_request(host,endpoint,"GET","Accept: application/x-git-upload-pack-advertisement\r\n",
+                             0,0,git_refs_sink,&state,&response_length,&status);
+    if(!ok||status!=200||state.malformed||!state.saw_flush)return 0;
+    if(state.found){for(uint8_t i=0;i<=state.oid_length;i++)oid[i]=state.oid[i];*oid_length=state.oid_length;}
+    if(side_band_64k)*side_band_64k=state.side_band_64k;
+    if(default_ref&&default_ref_capacity){uint16_t i=0;while(state.default_ref[i]&&i+1<default_ref_capacity){default_ref[i]=state.default_ref[i];i++;}default_ref[i]=0;}
+    return !requested||state.found;
+}
+
+typedef struct {
+    uint8_t prefix[4];
+    uint8_t prefix_length;
+    uint16_t packet_left;
+    uint16_t packet_position;
+    uint8_t channel;
+    uint8_t malformed;
+    uint8_t saw_flush;
+    uint8_t pack_magic[4];
+    uint8_t pack_magic_length;
+    uint8_t output[512];
+    uint16_t output_length;
+    https_file_writer_t *writer;
+} git_pack_state_t;
+
+static int git_pack_flush_output(git_pack_state_t *state)
+{
+    if(!state->output_length)return 1;
+    if(!https_file_sink(state->output,state->output_length,state->writer))return 0;
+    state->output_length=0;return 1;
+}
+
+static int git_pack_data(git_pack_state_t *state,uint8_t value)
+{
+    if(state->pack_magic_length<4)state->pack_magic[state->pack_magic_length++]=value;
+    state->output[state->output_length++]=value;
+    if(state->output_length==sizeof(state->output))return git_pack_flush_output(state);
+    return 1;
+}
+
+static int git_pack_sink(const uint8_t *data,uint16_t length,void *context)
+{
+    git_pack_state_t *state=context;
+    for(uint16_t i=0;i<length;i++){
+        uint8_t value=data[i];
+        if(state->packet_left){
+            if(state->packet_position==0)state->channel=value;
+            else if(state->channel==1){if(!git_pack_data(state,value))return 0;}
+            else if(state->channel==3){state->malformed=1;return 0;}
+            state->packet_position++;state->packet_left--;
+            if(state->packet_left==0)state->packet_position=0;
+            continue;
+        }
+        state->prefix[state->prefix_length++]=value;
+        if(state->prefix_length==4){
+            int packet_length=git_parse_packet_length(state->prefix);state->prefix_length=0;
+            if(packet_length<0){state->malformed=1;return 0;}
+            if(packet_length==0){state->saw_flush=1;continue;}
+            if(packet_length==1||packet_length==2)continue;
+            if(packet_length<4){state->malformed=1;return 0;}
+            state->packet_left=(uint16_t)(packet_length-4);state->packet_position=0;
+        }
+    }
+    return !state->malformed;
+}
+
+static void git_put_hex4(uint8_t *output,uint16_t value)
+{
+    static const char digits[]="0123456789abcdef";
+    output[0]=digits[(value>>12)&15];output[1]=digits[(value>>8)&15];
+    output[2]=digits[(value>>4)&15];output[3]=digits[value&15];
+}
+
+static int git_fetch_pack(const char *host,const char *repository,const char *requested,const char *filename)
+{
+    char oid[65],endpoint[512];uint8_t oid_length=0;uint8_t request[160];uint16_t line_length;
+    uint32_t response_length=0;uint16_t status=0;
+    uint8_t side_band_64k=0;
+    if(!git_discover_refs(host,repository,requested,0,oid,&oid_length,&side_band_64k,0,0)||!side_band_64k)return 0;
+    if(oid_length!=40)return 0;
+    if(!git_endpoint(endpoint,sizeof(endpoint),repository,"/git-upload-pack"))return 0;
+    static const char command_prefix[]="want ",command_suffix[]=" side-band-64k\n";
+    line_length=(uint16_t)(sizeof(command_prefix)-1+oid_length+sizeof(command_suffix)-1);
+    git_put_hex4(request,(uint16_t)(line_length+4));
+    uint16_t p=4;
+    for(uint8_t i=0;i<sizeof(command_prefix)-1;i++)request[p++]=command_prefix[i];
+    for(uint8_t i=0;i<oid_length;i++)request[p++]=(uint8_t)oid[i];
+    for(uint8_t i=0;i<sizeof(command_suffix)-1;i++)request[p++]=command_suffix[i];
+    request[p++]='0';request[p++]='0';request[p++]='0';request[p++]='0';
+    request[p++]='0';request[p++]='0';request[p++]='0';request[p++]='9';
+    request[p++]='d';request[p++]='o';request[p++]='n';request[p++]='e';request[p++]='\n';
+    if(!ext4_write_begin(filename))return 0;
+    https_file_writer_t writer={0};git_pack_state_t pack={0};pack.writer=&writer;
+    int ok=net_https_request(host,endpoint,"POST",
+        "Content-Type: application/x-git-upload-pack-request\r\nAccept: application/x-git-upload-pack-result\r\n",
+        request,p,git_pack_sink,&pack,&response_length,&status);
+    if(!git_pack_flush_output(&pack))pack.malformed=1;
+    uint32_t saved=https_file_finish(&writer);
+    int received=ok&&status==200&&!pack.malformed&&!writer.failed&&pack.saw_flush&&
+           !pack.packet_left&&!pack.prefix_length&&pack.pack_magic_length==4&&
+           pack.pack_magic[0]=='P'&&pack.pack_magic[1]=='A'&&pack.pack_magic[2]=='C'&&pack.pack_magic[3]=='K'&&saved>0;
+    if(!received)return 0;
+    oid[40]=0;
+    return git_install_pack(filename,oid,requested);
+}
+
+static int git_clone_repo(const char *host,const char *repository,const char *directory)
+{
+    char oid[65],default_ref[128];uint8_t oid_length=0;
+    if(!git_discover_refs(host,repository,0,0,oid,&oid_length,0,default_ref,sizeof(default_ref)))return 0;
+    if(!default_ref[0]){
+        static const char fallback[]="refs/heads/main";
+        uint8_t i=0;while(fallback[i]){default_ref[i]=fallback[i];i++;}default_ref[i]=0;
+    }
+    if(create_directory(directory)!=1)return 0;
+    if(!ext4_chdir(directory))return 0;
+    int ok=git_fetch_pack(host,repository,default_ref,".git-pack");
+    if(!ok&&streq(default_ref,"refs/heads/main"))
+        ok=git_fetch_pack(host,repository,"refs/heads/master",".git-pack");
+    (void)ext4_chdir("..");
+    return ok;
+}
+
 static void execute_command(char *command)
 {
     if (*command == '\0') return;
@@ -317,6 +592,9 @@ static void execute_command(char *command)
         print("  https HOST [CAMINHO] busca uma pagina HTTPS\n");
         print("  https-post HOST CAMINHO CORPO envia POST HTTPS\n");
         print("  https-save HOST CAMINHO ARQUIVO baixa corpo para ext4\n");
+        print("  git refs HOST REPO lista referencias remotas\n");
+        print("  git fetch HOST REPO REF ARQUIVO recebe o pack e faz checkout\n");
+        print("  git clone URL [DIRETORIO] clona um repositorio\n");
         print("  mkdir NOME cria um diretorio no disco\n");
         print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
@@ -445,6 +723,68 @@ static void execute_command(char *command)
         }
     } else if (streq(command, "tcp")) {
         print("Uso: tcp IP PORT\n");
+    } else if (starts_with(command, "git refs ")) {
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else {
+            char *cursor=command+9,*host=next_argument(&cursor),*repository=next_argument(&cursor);
+            char oid[65];uint8_t oid_length=0;
+            if(!host||!repository||next_argument(&cursor))print("Uso: git refs HOST REPO_PATH\n");
+            else {
+                print("Referencias remotas:\n");
+                if(!git_discover_refs(host,repository,0,1,oid,&oid_length,0,0,0))print("Falha ao ler refs Git via HTTPS.\n");
+            }
+        }
+    } else if (starts_with(command, "git fetch ")) {
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else if(!disk_ready)print("Disco indisponivel.\n");
+        else {
+            char *cursor=command+10,*host=next_argument(&cursor),*repository=next_argument(&cursor);
+            char *reference=next_argument(&cursor),*filename=next_argument(&cursor);
+            if(!host||!repository||!reference||!filename||next_argument(&cursor)||!valid_file_name(filename))
+                print("Uso: git fetch HOST REPO_PATH REF ARQUIVO_PACK\n");
+            else {
+                print("Negociando pack Git para ");print(reference);print("...\n");
+                if(git_fetch_pack(host,repository,reference,filename)){
+                    uint32_t size;
+                    if(ext4_read_start(filename,&size)){print("Checkout concluido; pack de ");print_u32(size);print(" bytes salvo em ");print(filename);put_char('\n');ext4_read_end();}
+                    else print("Checkout concluido, mas nao foi possivel ler o tamanho do pack.\n");
+                } else print("Fetch Git falhou ou o servidor nao entregou um pack valido.\n");
+            }
+        }
+    } else if (starts_with(command, "git clone ")) {
+        if(!network_stack_ready)print("Rede indisponivel.\n");
+        else if(!disk_ready)print("Disco indisponivel.\n");
+        else {
+            char *cursor=command+10,*target=next_argument(&cursor),*second=next_argument(&cursor);
+            char clone_host[256];const char *host=clone_host,*repository=0;char *directory=0;
+            uint8_t url_form=0;
+            if(target){for(uint16_t i=0;target[i];i++)if(target[i]=='/')url_form=1;}
+            if(target&&(starts_with(target,"https://")||url_form)){
+                const char *url_path;
+                if(!parse_https_target(target,0,clone_host,&url_path))target=0;
+                else {repository=url_path;directory=second;}
+            }else if(target){
+                uint16_t n=0;while(target[n]&&n<sizeof(clone_host)-1)n++;
+                if(target[n])target=0;else {for(uint16_t i=0;i<n;i++)clone_host[i]=target[i];clone_host[n]=0;}
+                repository=second;directory=next_argument(&cursor);
+            }
+            char inferred[64];
+            if(!directory&&repository){
+                const char *base=repository;for(const char *p=repository;*p;p++)if(*p=='/')base=p+1;
+                uint16_t length=0;while(base[length]&&base[length]!='?'&&length<sizeof(inferred)-1)length++;
+                if(length>4&&base[length-4]=='.'&&base[length-3]=='g'&&base[length-2]=='i'&&base[length-1]=='t')length-=4;
+                for(uint16_t i=0;i<length;i++)inferred[i]=base[i];inferred[length]=0;directory=inferred;
+            }
+            if(!host||!repository||!directory||!*directory||next_argument(&cursor)||!valid_file_name(directory))
+                print("Uso: git clone URL [DIRETORIO] ou git clone HOST REPO_PATH [DIRETORIO]\n");
+            else {
+                print("Clonando ");print(repository);print(" em ");print(directory);print("...\n");
+                if(git_clone_repo(host,repository,directory))print("Clone concluido.\n");
+                else print("Clone falhou; confira a rede, a branch padrao e o espaco em disco.\n");
+            }
+        }
+    } else if (streq(command,"git")) {
+        print("Uso: git clone URL [DIRETORIO] | git refs HOST REPO_PATH | git fetch HOST REPO_PATH REF ARQUIVO_PACK\n");
     } else if (starts_with(command, "https-post ")) {
         if(!network_stack_ready)print("Rede indisponivel.\n");
         else {
