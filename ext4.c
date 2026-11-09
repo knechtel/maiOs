@@ -304,6 +304,118 @@ static int dir_add(uint32_t dir_ino,const char *name,uint32_t ino,uint8_t type){
     if(!block_write(physical,data))return 0;
     wr32(raw+4,(blocks+1)*BLOCK_SIZE);return inode_write(dir_ino,raw);
 }
+
+static int dir_remove(uint32_t dir_ino,const char *name,uint32_t expected_ino){
+    uint8_t raw[128],data[BLOCK_SIZE];
+    if(!inode_read(dir_ino,raw)||!rd32(raw+4))return 0;
+    uint32_t blocks=(rd32(raw+4)+BLOCK_SIZE-1)/BLOCK_SIZE;
+    for(uint32_t b=0;b<blocks;b++){
+        uint32_t physical;
+        if(!inode_map_block(dir_ino,raw,b,0,&physical)||!block_read(physical,data))return 0;
+        for(uint32_t off=0;off+8<=BLOCK_SIZE;){
+            uint32_t ino=rd32(data+off);uint16_t rec=rd16(data+off+4);uint8_t len=data[off+6];
+            if(rec<8||off+rec>BLOCK_SIZE||len>rec-8)return 0;
+            size_t n=0;while(name[n]&&n<len&&name[n]==(char)data[off+8+n])n++;
+            if(ino==expected_ino&&name[n]==0&&n==len){
+                wr32(data+off,0);
+                return block_write(physical,data);
+            }
+            off+=rec;
+        }
+    }
+    return 0;
+}
+
+static int directory_is_empty(uint32_t ino,const uint8_t *raw){
+    uint8_t data[BLOCK_SIZE];
+    uint32_t blocks=(rd32(raw+4)+BLOCK_SIZE-1)/BLOCK_SIZE;
+    for(uint32_t b=0;b<blocks;b++){
+        uint32_t physical;
+        if(!inode_map_block(ino,(uint8_t *)raw,b,0,&physical)||!block_read(physical,data))return 0;
+        for(uint32_t off=0;off+8<=BLOCK_SIZE;){
+            uint32_t child=rd32(data+off);uint16_t rec=rd16(data+off+4);uint8_t len=data[off+6];
+            if(rec<8||off+rec>BLOCK_SIZE||len>rec-8)return 0;
+            if(child&&len&&!(len==1&&data[off+8]=='.')&&
+               !(len==2&&data[off+8]=='.'&&data[off+9]=='.'))return 0;
+            off+=rec;
+        }
+    }
+    return 1;
+}
+
+static int free_block(uint32_t block){
+    if(block<first_data_block||block>=blocks_count)return 0;
+    uint32_t relative=block-first_data_block;
+    uint32_t group=relative/blocks_per_group,bit=relative%blocks_per_group;
+    if(group>=group_count||bit>=group_block_limit(group))return 0;
+    uint8_t *desc=group_desc(group);uint8_t map[BLOCK_SIZE];
+    if(!block_read(rd32(desc),map))return 0;
+    if(!(map[bit>>3]&(1u<<(bit&7))))return 0;
+    map[bit>>3]&=(uint8_t)~(1u<<(bit&7));
+    if(!block_write(rd32(desc),map))return 0;
+    wr16(desc+12,rd16(desc+12)+1);wr32(super+12,rd32(super+12)+1);
+    return group_desc_write(group)&&block_write(1,super);
+}
+
+static int free_block_tree(uint32_t block,uint8_t level){
+    if(!block)return 1;
+    if(!level)return free_block(block);
+    uint8_t pointers[BLOCK_SIZE];
+    if(block>=blocks_count||!block_read(block,pointers))return 0;
+    for(uint16_t i=0;i<BLOCK_SIZE/4;i++){
+        uint32_t child=rd32(pointers+i*4);
+        if(child&&!free_block_tree(child,(uint8_t)(level-1)))return 0;
+    }
+    return free_block(block);
+}
+
+static int free_inode(uint32_t ino,int directory){
+    uint32_t group=(ino-1)/inodes_per_group,index=(ino-1)%inodes_per_group;
+    if(group>=group_count||index>=group_inode_limit(group))return 0;
+    uint8_t *desc=group_desc(group);uint8_t map[BLOCK_SIZE];
+    if(!block_read(rd32(desc+4),map)||!(map[index>>3]&(1u<<(index&7))))return 0;
+    map[index>>3]&=(uint8_t)~(1u<<(index&7));
+    if(!block_write(rd32(desc+4),map))return 0;
+    wr16(desc+14,rd16(desc+14)+1);
+    if(directory&&rd16(desc+16))wr16(desc+16,rd16(desc+16)-1);
+    wr32(super+16,rd32(super+16)+1);
+    return group_desc_write(group)&&block_write(1,super);
+}
+
+static int remove_entry(const char *name,int want_directory){
+    uint32_t ino,parent_ino=cwd_inode;uint8_t type,raw[128];
+    if(!mounted||!name||!name[0]||same(name,".")||same(name,"..")||
+       active_inode||!entry_find(name,&ino,&type)||!inode_read(ino,raw))return 0;
+    uint16_t mode=rd16(raw);
+    int is_directory=(mode&0xF000)==0x4000;
+    if(is_directory!=want_directory||((mode&0xF000)!=0x4000&&(mode&0xF000)!=0x8000))return 0;
+    if(read_inode==ino)return 0;
+    if(is_directory&&!directory_is_empty(ino,raw))return 0;
+    if(!dir_remove(parent_ino,name,ino))return 0;
+    if(!is_directory&&rd16(raw+26)>1){
+        wr16(raw+26,rd16(raw+26)-1);
+        return inode_write(ino,raw);
+    }
+
+    for(uint8_t i=0;i<12;i++){
+        uint32_t block=rd32(raw+40+i*4);
+        if(block&&!free_block(block))return 0;
+    }
+    if(!free_block_tree(rd32(raw+88),1)||
+       !free_block_tree(rd32(raw+92),2)||
+       !free_block_tree(rd32(raw+96),3))return 0;
+    if(is_directory){
+        uint8_t parent[128];
+        if(!inode_read(parent_ino,parent))return 0;
+        if(rd16(parent+26)>2)wr16(parent+26,rd16(parent+26)-1);
+        if(!inode_write(parent_ino,parent))return 0;
+    }
+    return free_inode(ino,is_directory);
+}
+
+int ext4_unlink(const char *name){return remove_entry(name,0);}
+int ext4_rmdir(const char *name){return remove_entry(name,1);}
+
 int ext4_list(ext4_entry_t *entries,size_t capacity){
     uint8_t raw[128],data[BLOCK_SIZE];if(!mounted||!inode_read(cwd_inode,raw))return -1;int count=0;
     uint32_t blocks=(rd32(raw+4)+BLOCK_SIZE-1)/BLOCK_SIZE;

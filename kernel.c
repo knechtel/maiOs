@@ -649,6 +649,8 @@ static void execute_command(char *command)
         print("  git fetch HOST REPO REF ARQUIVO recebe o pack e faz checkout\n");
         print("  git clone URL [DIRETORIO] clona um repositorio\n");
         print("  mkdir NOME cria um diretorio no disco\n");
+        print("  rm NOME    apaga um arquivo\n");
+        print("  rmdir NOME apaga um diretorio vazio\n");
         print("  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa\n");
         print("  cat NOME   mostra um arquivo do disco\n");
         print("  halt       para a CPU\n");
@@ -676,6 +678,22 @@ static void execute_command(char *command)
             print("Uso: mkdir NOME (nome simples, maximo 63 caracteres).\n");
     } else if (streq(command, "mkdir")) {
         print("Uso: mkdir NOME (nome simples, maximo 63 caracteres).\n");
+    } else if (starts_with(command, "rm ")) {
+        const char *name=command+3;
+        if(!disk_ready)print("Disco indisponivel.\n");
+        else if(!valid_file_name(name))print("Uso: rm NOME (apaga um arquivo no diretorio atual).\n");
+        else if(ext4_unlink(name))print("Arquivo apagado.\n");
+        else print("rm: arquivo nao encontrado ou nao pode ser apagado.\n");
+    } else if (streq(command,"rm")) {
+        print("Uso: rm NOME (apaga um arquivo no diretorio atual).\n");
+    } else if (starts_with(command, "rmdir ")) {
+        const char *name=command+6;
+        if(!disk_ready)print("Disco indisponivel.\n");
+        else if(!valid_file_name(name))print("Uso: rmdir NOME (apaga um diretorio vazio no diretorio atual).\n");
+        else if(ext4_rmdir(name))print("Diretorio apagado.\n");
+        else print("rmdir: diretorio nao encontrado, nao vazio ou erro no disco.\n");
+    } else if (streq(command,"rmdir")) {
+        print("Uso: rmdir NOME (apaga um diretorio vazio no diretorio atual).\n");
     } else if (streq(command, "ls")) {
         if (disk_ready) list_files();
         else print("Disco ext4 indisponivel ou formato nao suportado.\n");
