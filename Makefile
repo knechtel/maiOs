@@ -36,7 +36,7 @@ ext4-2g.img:
 	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4-2g.img
 
 run: kernel.elf ext4-2g.img
-	qemu-system-i386 -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000
+	qemu-system-i386 -k pt-br -kernel kernel.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000
 
 clean:
 	rm -f boot.o kernel.o ext4.o e1000.o net.o kernel.elf

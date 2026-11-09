@@ -301,9 +301,21 @@ static void execute_command(char *command)
             uint32_t destination,gateway;
             net_get_config(0,0,&gateway);
             if (streq(command,"ping")) destination=gateway;
-            else if (!parse_ipv4(command+5,&destination)) {
-                print("Uso: ping [IPv4]\n");
-                return;
+            else {
+                char *host=command+5;
+                if(starts_with(host,"http://"))host+=7;
+                else if(starts_with(host,"https://"))host+=8;
+                for(char *end=host;*end;end++){
+                    if(*end=='/'||*end=='?'||*end=='#'){*end='\0';break;}
+                }
+                if(!parse_ipv4(host,&destination)){
+                    print("Resolvendo ");print(host);print("...\n");
+                    if(!net_dns_resolve(host,&destination)){
+                        print("Falha no DNS. Verifique a rede e tente: ping www.google.com.br\n");
+                        return;
+                    }
+                    print(host);print(" -> ");print_ipv4(destination);put_char('\n');
+                }
             }
             print("PING ");print_ipv4(destination);print(" ...\n");
             int result=net_ping(destination);
@@ -356,29 +368,58 @@ static void execute_command(char *command)
     }
 }
 
-/* Teclado PS/2 no mapa de scancodes Set 1 (teclas sem Shift). */
+/* Teclado PS/2 Set 1, com posições ABNT2. ç/Ç usam glifos CP437 da VGA. */
 static const char keymap[128] = {
     [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',
     [0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
     [0x0C]='-',[0x0D]='=',[0x0E]='\b',[0x0F]='\t',
     [0x10]='q',[0x11]='w',[0x12]='e',[0x13]='r',[0x14]='t',
     [0x15]='y',[0x16]='u',[0x17]='i',[0x18]='o',[0x19]='p',
-    [0x1A]='[',[0x1B]=']',[0x1C]='\n',[0x1E]='a',[0x1F]='s',
+    [0x1A]='\'',[0x1B]='[',[0x1C]='\n',[0x1E]='a',[0x1F]='s',
     [0x20]='d',[0x21]='f',[0x22]='g',[0x23]='h',[0x24]='j',
-    [0x25]='k',[0x26]='l',[0x27]=';',[0x28]='\'',[0x29]='`',
-    [0x2B]='\\',[0x2C]='z',[0x2D]='x',[0x2E]='c',[0x2F]='v',
+    [0x25]='k',[0x26]='l',[0x27]=0x87,[0x28]='~',[0x29]='-',
+    [0x2B]=']',[0x2C]='z',[0x2D]='x',[0x2E]='c',[0x2F]='v',
     [0x30]='b',[0x31]='n',[0x32]='m',[0x33]=',',[0x34]='.',
-    [0x35]='/',[0x39]=' '
+    [0x35]=';',[0x39]=' ',[0x56]='\\'
+};
+
+static const char shift_keymap[128] = {
+    [0x02]='!',[0x03]='@',[0x04]='#',[0x05]='$',[0x06]='%',
+    [0x07]='^',[0x08]='&',[0x09]='*',[0x0A]='(',[0x0B]=')',
+    [0x0C]='_',[0x0D]='+',[0x1A]='"',[0x1B]='{',[0x27]=0x80,
+    [0x28]='^',[0x29]='_',[0x2B]='}',[0x33]=';',[0x34]=':',
+    [0x35]='/',[0x56]='|'
+};
+
+static const char altgr_keymap[128] = {
+    [0x03]='@',[0x10]='\\',[0x11]='|',[0x1B]='[',[0x2B]=']',
+    [0x35]='?',[0x56]='|'
 };
 
 static char read_key(void)
 {
+    static uint8_t left_shift, right_shift, altgr, caps_lock, extended;
     for (;;) {
         if (network_stack_ready) net_poll();
         if (inb(0x64) & 1) {
             uint8_t scan = inb(0x60);
-            if (scan < 128 && keymap[scan])
-                return keymap[scan];
+            if (scan == 0xE0) { extended = 1; continue; }
+            uint8_t is_extended = extended;
+            extended = 0;
+            uint8_t released = (scan & 0x80) != 0;
+            uint8_t code = scan & 0x7F;
+            if (!is_extended && code == 0x2A) { left_shift = !released; continue; }
+            if (!is_extended && code == 0x36) { right_shift = !released; continue; }
+            if (is_extended && code == 0x38) { altgr = !released; continue; }
+            if (!is_extended && code == 0x3A && !released) { caps_lock = !caps_lock; continue; }
+            if (released || is_extended) continue;
+            char value = keymap[code];
+            uint8_t shifted = left_shift || right_shift;
+            if (altgr && altgr_keymap[code]) value = altgr_keymap[code];
+            else if (value >= 'a' && value <= 'z') {
+                if (shifted != caps_lock) value -= 'a' - 'A';
+            } else if (shifted && shift_keymap[code]) value = shift_keymap[code];
+            if (value) return value;
         }
         __asm__ volatile ("pause");
     }

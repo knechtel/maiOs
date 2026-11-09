@@ -3,6 +3,9 @@
 Este exemplo inicializa um kernel Multiboot 1 de 32 bits com um terminal
 interativo de texto VGA. O kernel lê o teclado PS/2 e oferece comandos internos
 simples; o pequeno arquivo assembly prepara a pilha e chama `kernel_main`.
+O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
+`make run` passa `-k pt-br` ao QEMU. O terminal VGA ainda não oferece suporte
+Unicode geral para acentos.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `cd`, `pwd`,
 `mkdir`, `write`, `cat`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
