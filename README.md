@@ -39,6 +39,19 @@ O port usa o runtime oficial do MicroPython com compilador, REPL, coletor de
 lixo e heap de 1 MiB. Esta configuração mínima não inclui números de ponto
 flutuante, módulos externos nem importação de outros arquivos Python.
 
+O módulo embutido `maiosfs` acessa arquivos do diretório atual no ext4:
+
+```python
+import maiosfs
+
+maiosfs.write("nota.txt", "conteúdo")  # cria ou substitui; aceita str ou bytes
+conteudo = maiosfs.read("nota.txt")    # retorna bytes
+maiosfs.remove("nota.txt")
+```
+
+Por enquanto os nomes precisam ser simples, sem subdiretórios, e os arquivos
+transferidos pelo MicroPython são limitados a 64 KiB.
+
 O módulo `webserver` oferece um servidor HTTP sequencial. Grave como
 `server.py` e execute `python server.py`:
 
