@@ -233,6 +233,26 @@ char *strcpy(char *destination,const char *source)
     char *result=destination;while((*destination++=*source++)){}return result;
 }
 
+char *strcat(char *destination,const char *source)
+{
+    char *result=destination;
+    while(*destination)destination++;
+    while((*destination++=*source++)){}
+    return result;
+}
+
+size_t strspn(const char *text,const char *accept)
+{
+    size_t length=0;
+    while(text[length]){
+        const char *cursor=accept;
+        while(*cursor&&*cursor!=text[length])cursor++;
+        if(!*cursor)break;
+        length++;
+    }
+    return length;
+}
+
 char *strncpy(char *destination,const char *source,size_t limit)
 {
     char *result=destination;size_t i=0;

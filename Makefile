@@ -20,7 +20,7 @@ CPYTHON_PORT = third_party/cpython/ports/maios
 CPYTHON_BUILD = build/cpython-maios
 CPYTHON_SYSROOT = $(CURDIR)/$(CPYTHON_PORT)/sysroot
 CPYTHON_CC = $(CC) -m32
-CPYTHON_CFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -O2 -ffreestanding -fno-pie -fno-stack-protector
+CPYTHON_CFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -O2 -ffreestanding -fno-pie -fno-stack-protector -I$(CURDIR)/third_party/sqlite
 CPYTHON_STAMP = $(CPYTHON_BUILD)/.configured
 CPYTHON_ARCHIVE = $(CPYTHON_BUILD)/libpython3.11.a
 CPYTHON_RUNTIME = $(CPYTHON_BUILD)/libmaiosrt.a
@@ -49,9 +49,10 @@ $(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.
 
 $(CPYTHON_STAMP): $(CPYTHON_PORT)/Makefile $(CPYTHON_PORT)/config.site $(CPYTHON_PORT)/Modules.Setup.local.example third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in third_party/cpython/Tools/scripts/freeze_modules.py
 	$(MAKE) -C $(CPYTHON_PORT) configure CC='$(CPYTHON_CC)' CFLAGS='$(CPYTHON_CFLAGS)' SYSROOT='$(CPYTHON_SYSROOT)' BUILD_DIR='$(abspath $(CPYTHON_BUILD))'
+	printf '%s\n' '_sqlite3 _sqlite/blob.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c ../../../third_party/sqlite/sqlite3_maios.c ../../../third_party/sqlite/maios_vfs.c' >> $(CPYTHON_BUILD)/Modules/Setup.local
 	@touch $@
 
-$(CPYTHON_ARCHIVE): $(CPYTHON_STAMP) third_party/cpython/Python/pylifecycle.c third_party/cpython/Python/frozen.c $(CPYTHON_PORT)/webserver.c $(CPYTHON_PORT)/maiosposix.c $(CPYTHON_PORT)/maiosfs.c
+$(CPYTHON_ARCHIVE): $(CPYTHON_STAMP) third_party/cpython/Python/pylifecycle.c third_party/cpython/Python/frozen.c $(CPYTHON_PORT)/webserver.c $(CPYTHON_PORT)/maiosposix.c $(CPYTHON_PORT)/maiosfs.c $(CPYTHON_PORT)/maios_time.c third_party/sqlite/sqlite3_maios.c third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h third_party/sqlite/maios_vfs.c
 	$(MAKE) -C $(CPYTHON_PORT) core BUILD_DIR='$(abspath $(CPYTHON_BUILD))'
 
 $(CPYTHON_RUNTIME): $(CPYTHON_STAMP) $(CPYTHON_PORT)/Makefile $(CPYTHON_RUNTIME_SOURCES)

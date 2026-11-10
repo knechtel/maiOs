@@ -6,6 +6,8 @@
 #include "gitpack.h"
 #include "cpython_port.h"
 
+int maios_sqlite_shell(const char *filename);
+
 #define VGA_MEMORY ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -679,6 +681,7 @@ static void show_help(void)
         "  git refs HOST REPO lista referencias remotas",
         "  git fetch HOST REPO REF ARQUIVO recebe o pack e faz checkout",
         "  git clone URL [DIRETORIO] clona um repositorio",
+        "  sqlite3 [ARQUIVO] abre o terminal SQL interativo",
         "  mkdir NOME cria um diretorio no disco",
         "  rm NOME    apaga um arquivo",
         "  rmdir NOME apaga um diretorio vazio",
@@ -720,6 +723,11 @@ static void execute_command(char *command)
     } else if (streq(command,"python")) {
         if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
         else if (maios_cpython_repl() < 0) print("O REPL do CPython foi interrompido por erro.\n");
+    } else if (streq(command, "sqlite3") || starts_with(command, "sqlite3 ")) {
+        const char *filename = streq(command, "sqlite3") ? "maios.db" : command + 8;
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!valid_file_name(filename)) print("Uso: sqlite3 [ARQUIVO] (nome simples, sem caminhos).\n");
+        else if (maios_sqlite_shell(filename) < 0) print("Nao foi possivel abrir ou fechar o banco SQLite.\n");
     } else if (starts_with(command,"python ")) {
         const char *filename=command+7;
         if(!disk_ready)print("Disco indisponivel.\n");

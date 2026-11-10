@@ -8,7 +8,7 @@ O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
 Unicode geral para acentos.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `cd`, `pwd`,
-`mkdir`, `rmdir`, `rm`, `write`, `cat`, `python`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
+`mkdir`, `rmdir`, `rm`, `write`, `cat`, `python`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
@@ -35,6 +35,13 @@ write exemplo.py print("oi do maiOs")
 python exemplo.py
 ```
 
+O comando `sqlite3 [ARQUIVO]` abre um terminal SQL interativo; sem argumento,
+usa `maios.db`. Encerre com `.quit` ou Ctrl+D. O mesmo banco fica disponível no
+CPython por `import sqlite3`, incluindo a API DB-API padrão. Os arquivos de
+banco são limitados a 4 MiB e precisam ter nomes simples no diretório atual.
+Use o journal padrão `DELETE`; WAL não está disponível, e o VFS não oferece
+bloqueios para acesso concorrente ao mesmo banco.
+
 O kernel padrão usa CPython 3.11.9, compilado para i386 com um runtime freestanding.
 O interpretador suporta scripts do ext4, REPL e os módulos built-in descritos
 abaixo. O comando `python` mantém a instância CPython ativa entre chamadas.
@@ -47,6 +54,19 @@ import maiosfs
 maiosfs.write("nota.txt", "conteúdo")  # cria ou substitui; aceita str ou bytes
 conteudo = maiosfs.read("nota.txt")    # retorna bytes
 maiosfs.remove("nota.txt")
+```
+
+O módulo `sqlite3` usa o mecanismo SQLite 3.54.1 e o ext4 do maiOs. Exemplo:
+
+```python
+import sqlite3
+
+db = sqlite3.connect("dados.db")
+db.execute("CREATE TABLE IF NOT EXISTS notas (texto TEXT)")
+db.execute("INSERT INTO notas VALUES (?)", ("ola",))
+print(db.execute("SELECT texto FROM notas").fetchall())
+db.commit()
+db.close()
 ```
 
 Por enquanto os nomes precisam ser simples, sem subdiretórios, e os arquivos
