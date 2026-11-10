@@ -416,6 +416,20 @@ static int remove_entry(const char *name,int want_directory){
 int ext4_unlink(const char *name){return remove_entry(name,0);}
 int ext4_rmdir(const char *name){return remove_entry(name,1);}
 
+int ext4_rename(const char *old_name,const char *new_name){
+    uint32_t ino,destination;uint8_t type,raw[128];
+    if(!mounted||!old_name||!new_name||!old_name[0]||!new_name[0]||
+       same(old_name,".")||same(old_name,"..")||same(new_name,".")||same(new_name,"..")||
+       active_inode||!entry_find(old_name,&ino,&type)||
+       (entry_find(new_name,&destination,&type)&&destination!=ino)||
+       !inode_read(ino,raw)||(rd16(raw)&0xF000)!=0x8000||read_inode==ino)return 0;
+    if(same(old_name,new_name))return 1;
+    if(!dir_add(cwd_inode,new_name,ino,1))return 0;
+    if(dir_remove(cwd_inode,old_name,ino))return 1;
+    dir_remove(cwd_inode,new_name,ino);
+    return 0;
+}
+
 int ext4_list(ext4_entry_t *entries,size_t capacity){
     uint8_t raw[128],data[BLOCK_SIZE];if(!mounted||!inode_read(cwd_inode,raw))return -1;int count=0;
     uint32_t blocks=(rd32(raw+4)+BLOCK_SIZE-1)/BLOCK_SIZE;

@@ -684,6 +684,7 @@ static void show_help(void)
         "  sqlite3 [ARQUIVO] abre o terminal SQL interativo",
         "  mkdir NOME cria um diretorio no disco",
         "  rm NOME    apaga um arquivo",
+        "  mv ATUAL NOVO renomeia um arquivo",
         "  rmdir NOME apaga um diretorio vazio",
         "  python     inicia o REPL CPython",
         "  python ARQUIVO.py executa um script do ext4",
@@ -756,6 +757,15 @@ static void execute_command(char *command)
         else print("rm: arquivo nao encontrado ou nao pode ser apagado.\n");
     } else if (streq(command,"rm")) {
         print("Uso: rm NOME (apaga um arquivo no diretorio atual).\n");
+    } else if (starts_with(command,"mv ")) {
+        char *cursor=command+3,*old_name=next_argument(&cursor),*new_name=next_argument(&cursor);
+        if(!disk_ready)print("Disco indisponivel.\n");
+        else if(!old_name||!new_name||next_argument(&cursor)||!valid_file_name(old_name)||!valid_file_name(new_name))
+            print("Uso: mv NOME_ATUAL NOVO_NOME (arquivos no diretorio atual).\n");
+        else if(ext4_rename(old_name,new_name))print("Arquivo renomeado.\n");
+        else print("mv: arquivo nao encontrado, destino existente ou erro no disco.\n");
+    } else if (streq(command,"mv")) {
+        print("Uso: mv NOME_ATUAL NOVO_NOME (arquivos no diretorio atual).\n");
     } else if (starts_with(command, "rmdir ")) {
         const char *name=command+6;
         if(!disk_ready)print("Disco indisponivel.\n");

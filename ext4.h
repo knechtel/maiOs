@@ -22,6 +22,7 @@ int ext4_write_finish(uint32_t size);
 int ext4_write(const char *name, const uint8_t *data, size_t size);
 int ext4_mkdir(const char *name);
 int ext4_unlink(const char *name);
+int ext4_rename(const char *old_name, const char *new_name);
 int ext4_rmdir(const char *name);
 
 #endif

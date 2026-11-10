@@ -8,7 +8,7 @@ O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
 Unicode geral para acentos.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `cd`, `pwd`,
-`mkdir`, `rmdir`, `rm`, `write`, `cat`, `python`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
+`mkdir`, `rmdir`, `rm`, `mv`, `write`, `cat`, `python`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
@@ -19,6 +19,8 @@ Para gravar várias linhas, use `write NOME`, digite o conteúdo e finalize com 
 ponto sozinho em uma linha. `cat NOME` lê os blocos do arquivo em sequência.
 Use `rm NOME` para apagar um arquivo e `rmdir NOME` para apagar um diretório
 vazio no diretório atual. Os dois comandos aceitam nomes simples, sem caminhos.
+Use `mv NOME_ATUAL NOVO_NOME` para renomear um arquivo no diretório atual; o
+destino não pode existir.
 `python` abre o REPL CPython; `python ARQUIVO.py` executa um script salvo no
 diretório atual. Exemplo:
 
