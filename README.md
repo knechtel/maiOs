@@ -19,7 +19,7 @@ Para gravar várias linhas, use `write NOME`, digite o conteúdo e finalize com 
 ponto sozinho em uma linha. `cat NOME` lê os blocos do arquivo em sequência.
 Use `rm NOME` para apagar um arquivo e `rmdir NOME` para apagar um diretório
 vazio no diretório atual. Os dois comandos aceitam nomes simples, sem caminhos.
-`python` abre o REPL MicroPython; `python ARQUIVO.py` executa um script salvo no
+`python` abre o REPL CPython; `python ARQUIVO.py` executa um script salvo no
 diretório atual. Exemplo:
 
 ```text
@@ -35,9 +35,9 @@ write exemplo.py print("oi do maiOs")
 python exemplo.py
 ```
 
-O port usa o runtime oficial do MicroPython com compilador, REPL, coletor de
-lixo e heap de 1 MiB. Esta configuração mínima não inclui números de ponto
-flutuante, módulos externos nem importação de outros arquivos Python.
+O kernel padrão usa CPython 3.11.9, compilado para i386 com um runtime freestanding.
+O interpretador suporta scripts do ext4, REPL e os módulos built-in descritos
+abaixo. O comando `python` mantém a instância CPython ativa entre chamadas.
 
 O módulo embutido `maiosfs` acessa arquivos do diretório atual no ext4:
 
@@ -52,8 +52,8 @@ maiosfs.remove("nota.txt")
 Por enquanto os nomes precisam ser simples, sem subdiretórios, e os arquivos
 transferidos pelo MicroPython são limitados a 64 KiB.
 
-O módulo `webserver` oferece um servidor HTTP sequencial. Grave como
-`server.py` e execute `python server.py`:
+O módulo CPython built-in `webserver` oferece um servidor HTTP sequencial.
+Grave o script como `server.py` e execute `python server.py`:
 
 ```python
 import webserver
@@ -61,12 +61,14 @@ import webserver
 def page(method, path):
     return "maiOs diz ola! Voce pediu " + path
 
-webserver.serve(page)  # porta TCP 8070
+webserver.serve(page)  # porta TCP 8070; também aceita webserver.serve(page, 8080)
 ```
 
 Com `make run`, o QEMU encaminha `127.0.0.1:8070` do host para o maiOs. Acesse
-`http://127.0.0.1:8070/`. O servidor atende uma conexão por vez e limita a
-resposta a 16 KiB.
+`http://127.0.0.1:8070/`. O callback recebe método e caminho e deve retornar
+`str` ou `bytes`. O servidor atende uma conexão por vez e limita a resposta a
+16 KiB. Respostas usam HTTP 200; requisições malformadas e erros do callback
+recebem 400 e 500, respectivamente.
 
 O driver suporta até 256 grupos ext4 com blocos de 1024 bytes. Ele não suporta
 journal, extents, checksums ou partições. A navegação por diretórios é limitada
@@ -84,10 +86,10 @@ essa configuração e `ping` sem argumento testa o gateway. A pilha também faz
 configuração DHCP no boot (com fallback estático), transporte UDP e consulta DNS
 de registros IPv4 tipo A. Use `dhcp` para renovar a configuração, `ifconfig` para
 ver IP/máscara/gateway/DNS, e `dns exemplo.com` para resolver um nome. TCP
-implementa conexão de saída com handshake, envio/recepção de segmentos e
-encerramento para uma conexão por vez. O comando `tcp IP PORT` testa o handshake
-e fecha a conexão; suporte a servidor/listen, retransmissão avançada e múltiplas
-conexões ainda não está implementado. HTTPS usa BearSSL 0.6, valida certificados
+implementa conexões de saída e `accept` sequencial para uma conexão por vez. O
+built-in CPython `webserver` usa essa API; retransmissão avançada e múltiplas
+conexões simultâneas ainda não são suportadas. O comando `tcp IP PORT` testa o
+handshake de saída e fecha a conexão. HTTPS usa BearSSL 0.6, valida certificados
 contra raízes incluídas no kernel e lê a data do RTC. `make run` ativa RDRAND
 no CPU virtual do QEMU para semear o TLS. O cliente HTTP/1.1 envia GET e POST,
 envia corpos e lê respostas com `Content-Length`, `Transfer-Encoding: chunked`

@@ -4,7 +4,7 @@
 #include "e1000.h"
 #include "net.h"
 #include "gitpack.h"
-#include "micropython_port.h"
+#include "cpython_port.h"
 
 #define VGA_MEMORY ((volatile uint16_t *)0xB8000)
 #define VGA_WIDTH 80
@@ -682,7 +682,7 @@ static void show_help(void)
         "  mkdir NOME cria um diretorio no disco",
         "  rm NOME    apaga um arquivo",
         "  rmdir NOME apaga um diretorio vazio",
-        "  python     inicia o REPL MicroPython",
+        "  python     inicia o REPL CPython",
         "  python ARQUIVO.py executa um script do ext4",
         "  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa",
         "  cat NOME   mostra um arquivo do disco",
@@ -718,12 +718,14 @@ static void execute_command(char *command)
     } else if (streq(command, "about")) {
         print("maiOs - kernel experimental de 32 bits\nExecutando no modo protegido x86.\n");
     } else if (streq(command,"python")) {
-        maios_python_repl();
+        if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
+        else if (maios_cpython_repl() < 0) print("O REPL do CPython foi interrompido por erro.\n");
     } else if (starts_with(command,"python ")) {
         const char *filename=command+7;
         if(!disk_ready)print("Disco indisponivel.\n");
         else if(!valid_file_name(filename))print("Uso: python ARQUIVO.py (arquivo no diretorio atual).\n");
-        else if(!maios_python_run_file(filename))print("Nao foi possivel carregar ou executar o script Python.\n");
+        else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
+        else if (maios_cpython_run_file(filename) < 0) print("Nao foi possivel carregar ou executar o script Python.\n");
     } else if (starts_with(command, "mkdir ")) {
         int result = disk_ready ? create_directory(command + 6) : -4;
         if (result == 1)
