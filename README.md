@@ -82,17 +82,18 @@ Grave o script como `server.py` e execute `python server.py`:
 ```python
 import webserver
 
-def page(method, path):
+def page(method, path, body):
     return "maiOs diz ola! Voce pediu " + path
 
 webserver.serve(page)  # porta TCP 8070; também aceita webserver.serve(page, 8080)
 ```
 
 Com `make run`, o QEMU encaminha `127.0.0.1:8070` do host para o maiOs. Acesse
-`http://127.0.0.1:8070/`. O callback recebe método e caminho e deve retornar
-`str` ou `bytes`. O servidor atende uma conexão por vez e limita a resposta a
-16 KiB. Respostas usam HTTP 200; requisições malformadas e erros do callback
-recebem 400 e 500, respectivamente.
+`http://127.0.0.1:8070/`. O callback recebe método, caminho e corpo como `bytes`
+e deve retornar `str` ou `bytes`. O corpo é lido conforme `Content-Length`, até
+16 KiB. O servidor atende uma conexão por vez e limita a resposta a 16 KiB.
+Respostas usam HTTP 200; requisições malformadas e erros do callback recebem
+400 e 500, respectivamente.
 
 O driver suporta até 256 grupos ext4 com blocos de 1024 bytes. Ele não suporta
 journal, extents, checksums ou partições. A navegação por diretórios é limitada
