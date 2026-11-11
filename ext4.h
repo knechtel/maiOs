@@ -24,5 +24,6 @@ int ext4_mkdir(const char *name);
 int ext4_unlink(const char *name);
 int ext4_rename(const char *old_name, const char *new_name);
 int ext4_rmdir(const char *name);
+int ext4_delete(const char *name);
 
 #endif

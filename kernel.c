@@ -683,6 +683,7 @@ static void show_help(void)
         "  git clone URL [DIRETORIO] clona um repositorio",
         "  sqlite3 [ARQUIVO] abre o terminal SQL interativo",
         "  mkdir NOME cria um diretorio no disco",
+        "  delete NOME apaga um diretorio e todo seu conteudo",
         "  rm NOME    apaga um arquivo",
         "  mv ATUAL NOVO renomeia um arquivo",
         "  rmdir NOME apaga um diretorio vazio",
@@ -757,6 +758,14 @@ static void execute_command(char *command)
         else print("rm: arquivo nao encontrado ou nao pode ser apagado.\n");
     } else if (streq(command,"rm")) {
         print("Uso: rm NOME (apaga um arquivo no diretorio atual).\n");
+    } else if (starts_with(command, "delete ")) {
+        const char *name=command+7;
+        if(!disk_ready)print("Disco indisponivel.\n");
+        else if(!valid_file_name(name))print("Uso: delete NOME (apaga o diretorio e todo seu conteudo no diretorio atual).\n");
+        else if(ext4_delete(name))print("Diretorio e conteudo apagados.\n");
+        else print("delete: diretorio nao encontrado ou erro ao apagar seu conteudo.\n");
+    } else if (streq(command,"delete")) {
+        print("Uso: delete NOME (apaga o diretorio e todo seu conteudo no diretorio atual).\n");
     } else if (starts_with(command,"mv ")) {
         char *cursor=command+3,*old_name=next_argument(&cursor),*new_name=next_argument(&cursor);
         if(!disk_ready)print("Disco indisponivel.\n");

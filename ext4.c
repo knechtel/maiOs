@@ -416,6 +416,30 @@ static int remove_entry(const char *name,int want_directory){
 int ext4_unlink(const char *name){return remove_entry(name,0);}
 int ext4_rmdir(const char *name){return remove_entry(name,1);}
 
+static int delete_directory_contents(void){
+    ext4_entry_t entries[16];
+    for(;;){
+        int count=ext4_list(entries,sizeof(entries)/sizeof(entries[0]));
+        if(count<0)return 0;
+        if(count==0)return 1;
+        const char *name=entries[0].name;
+        if(entries[0].directory){
+            if(!ext4_chdir(name))return 0;
+            int deleted=delete_directory_contents();
+            if(!ext4_chdir("..")||!deleted||!ext4_rmdir(name))return 0;
+        }else if(!ext4_unlink(name))return 0;
+    }
+}
+
+int ext4_delete(const char *name){
+    uint32_t ino;uint8_t type;
+    if(!mounted||!name||!name[0]||same(name,".")||same(name,"..")||active_inode||
+       !entry_find(name,&ino,&type)||!ext4_chdir(name))return 0;
+    int deleted=delete_directory_contents();
+    if(!ext4_chdir("..")||!deleted)return 0;
+    return ext4_rmdir(name);
+}
+
 int ext4_rename(const char *old_name,const char *new_name){
     uint32_t ino,destination;uint8_t type,raw[128];
     if(!mounted||!old_name||!new_name||!old_name[0]||!new_name[0]||
