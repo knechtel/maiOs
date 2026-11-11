@@ -46,7 +46,9 @@ bloqueios para acesso concorrente ao mesmo banco.
 
 O kernel padrão usa CPython 3.11.9, compilado para i386 com um runtime freestanding.
 O interpretador suporta scripts do ext4, REPL e os módulos built-in descritos
-abaixo. O comando `python` mantém a instância CPython ativa entre chamadas.
+abaixo. `json` também está incluído: o pacote e seu acelerador `_json` ficam no
+binário, sem exigir arquivos de biblioteca no ext4. O comando `python` mantém a
+instância CPython ativa entre chamadas.
 
 O módulo embutido `maiosfs` acessa arquivos do diretório atual no ext4:
 
