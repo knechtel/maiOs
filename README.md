@@ -90,6 +90,26 @@ def page(method, path, body):
 webserver.serve(page)  # porta TCP 8070; também aceita webserver.serve(page, 8080)
 ```
 
+O servidor mantém até 16 sessões em memória. `webserver.session()` retorna o
+dicionário da requisição atual; os valores ficam disponíveis nas próximas
+requisições que enviarem o cookie de sessão. O servidor cria o cookie
+`maios_session` quando necessário, com `HttpOnly` e `SameSite=Lax`:
+
+```python
+import webserver
+
+def page(method, path, body):
+    session = webserver.session()
+    session["visitas"] = session.get("visitas", 0) + 1
+    return "Visitas nesta sessão: " + str(session["visitas"])
+
+webserver.serve(page)
+```
+
+As sessões existem somente enquanto o processo do servidor estiver ativo; ao
+atingir 16 sessões, uma sessão antiga é substituída. `session()` só pode ser
+chamada durante o callback de uma requisição.
+
 Com `make run`, o QEMU encaminha `127.0.0.1:8070` do host para o maiOs. Acesse
 `http://127.0.0.1:8070/`. O callback recebe método, caminho e corpo como `bytes`
 e deve retornar `str` ou `bytes`. O corpo é lido conforme `Content-Length`, até
