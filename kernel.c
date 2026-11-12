@@ -23,6 +23,27 @@ static int streq(const char *left, const char *right);
 static void print(const char *text);
 static void put_char(char c);
 static char read_key(void);
+static inline uint8_t inb(uint16_t port);
+
+static volatile uint8_t keyboard_ctrl_down;
+static volatile uint8_t keyboard_interrupt;
+
+/* Network waits run in C, so they must poll the PS/2 controller too. */
+int maios_poll_keyboard_interrupt(void)
+{
+    while (inb(0x64) & 1) {
+        uint8_t scan = inb(0x60);
+        if (scan == 0xE0) continue;
+        uint8_t released = (scan & 0x80) != 0;
+        uint8_t code = scan & 0x7f;
+        if (code == 0x1d) keyboard_ctrl_down = !released;
+        else if (!released && keyboard_ctrl_down && code == 0x2e)
+            keyboard_interrupt = 1;
+    }
+    return keyboard_interrupt != 0;
+}
+
+void maios_clear_keyboard_interrupt(void) { keyboard_interrupt = 0; }
 static void write_interactive(const char *name);
 
 int maios_python_read_char(void);

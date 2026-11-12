@@ -1,4 +1,15 @@
 #include "net.h"
+
+extern int maios_poll_keyboard_interrupt(void);
+extern void maios_clear_keyboard_interrupt(void);
+static int interrupt_pending;
+
+int net_interrupt_pending(void) { return interrupt_pending; }
+void net_clear_interrupt(void)
+{
+    interrupt_pending=0;
+    maios_clear_keyboard_interrupt();
+}
 #include "e1000.h"
 
 #define ETH_FRAME_MAX 1518u
@@ -180,6 +191,14 @@ void net_init(const uint8_t mac[6])
 
 void net_poll(void)
 {
+    /* Network waits can call net_poll millions of times per second. Sampling
+       the keyboard every 32 polls keeps Ctrl+C responsive without adding a
+       port-I/O operation to every network iteration. */
+    static uint8_t keyboard_poll_divider;
+    if (!interrupt_pending && ++keyboard_poll_divider == 32) {
+        keyboard_poll_divider = 0;
+        if (maios_poll_keyboard_interrupt()) interrupt_pending = 1;
+    }
     uint8_t frame[ETH_FRAME_MAX];
     for(uint8_t i=0;i<8;i++){
         int length=e1000_receive(frame,sizeof(frame));
@@ -509,6 +528,7 @@ int net_tcp_accept(uint16_t port)
     uint8_t data[IPV4_PAYLOAD_MAX];ipv4_packet_t ip;
     for(uint32_t wait=0;wait<100000000u;wait++){
         net_poll();
+        if(interrupt_pending){tcp_state.connected=0;return -1;}
         while(net_ipv4_receive(&ip,data,sizeof(data))==1){
             if(ip.protocol!=6||ip.length<TCP_HEADER_SIZE)continue;
             uint16_t header=(uint16_t)(data[12]>>4)*4;
@@ -521,6 +541,7 @@ int net_tcp_accept(uint16_t port)
             tcp_state.send_sequence++;
             for(uint32_t ackwait=0;ackwait<3000000u;ackwait++){
                 net_poll();uint8_t flags,payload[TCP_MSS];uint16_t length;uint32_t seq,ack;
+                if(interrupt_pending){tcp_state.connected=0;return -1;}
                 int next=tcp_next_segment(&flags,&seq,&ack,payload,sizeof(payload),&length);
                 if(next==1&&(flags&0x04))return 0;
                 if(next==1&&(flags&0x10)&&ack==tcp_state.send_sequence&&seq==tcp_state.receive_sequence){
@@ -628,6 +649,7 @@ int net_tcp_receive(uint8_t *data,uint16_t capacity,uint16_t *length)
     uint8_t flags,payload[TCP_MSS];uint16_t received;uint32_t sequence,acknowledgment;
     for(uint32_t wait=0;wait<10000000;wait++){
         net_poll();
+        if(interrupt_pending){tcp_read_error=NET_TCP_READ_ERROR_TIMEOUT;return -2;}
         int next;
         while((next=tcp_next_segment(&flags,&sequence,&acknowledgment,payload,
                                      sizeof(payload),&received))!=0){

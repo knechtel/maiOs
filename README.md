@@ -108,7 +108,8 @@ webserver.serve(page)
 
 As sessões existem somente enquanto o processo do servidor estiver ativo; ao
 atingir 16 sessões, uma sessão antiga é substituída. `session()` só pode ser
-chamada durante o callback de uma requisição.
+chamada durante o callback de uma requisição. Durante a execução do servidor,
+`Ctrl+C` interrompe `webserver.serve()` e retorna ao terminal do maiOs.
 
 Com `make run`, o QEMU encaminha `127.0.0.1:8070` do host para o maiOs. Acesse
 `http://127.0.0.1:8070/`. O callback recebe método, caminho e corpo como `bytes`

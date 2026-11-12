@@ -19,6 +19,8 @@ typedef struct {
 
 void net_init(const uint8_t mac[6]);
 void net_poll(void);
+int net_interrupt_pending(void);
+void net_clear_interrupt(void);
 int net_ping(uint32_t destination);
 int net_dhcp_configure(void);
 int net_dns_resolve(const char *name, uint32_t *address);
