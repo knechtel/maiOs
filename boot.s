@@ -27,6 +27,15 @@ stack_top:
 _start:
     cli
 
+    /* Use selectors owned by the kernel before installing interrupt gates. */
+    lgdt gdt_descriptor
+    ljmp $0x08, $1f
+1:
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+
     /* O BearSSL pode selecionar rotinas SSE2 após detectar os recursos da CPU. */
     mov %cr0, %eax
     and $~0x4, %eax             /* CR0.EM = 0 */
@@ -39,8 +48,43 @@ _start:
     mov $stack_top, %esp
     call kernel_main
 
-1:
+2:
     hlt
-    jmp 1b
+    jmp 2b
+
+.global irq0_stub
+irq0_stub:
+    pusha
+    mov %esp, %eax
+    push $1
+    push %eax
+    call scheduler_tick
+    add $8, %esp
+    mov %eax, %esp
+    popa
+    iret
+
+.global yield_stub
+yield_stub:
+    pusha
+    mov %esp, %eax
+    push $0
+    push %eax
+    call scheduler_tick
+    add $8, %esp
+    mov %eax, %esp
+    popa
+    iret
 
 .size _start, . - _start
+
+.section .rodata
+.align 8
+gdt:
+    .quad 0x0000000000000000
+    .quad 0x00CF9A000000FFFF
+    .quad 0x00CF92000000FFFF
+gdt_end:
+gdt_descriptor:
+    .word gdt_end - gdt - 1
+    .long gdt

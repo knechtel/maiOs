@@ -7,7 +7,14 @@ O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
 `make run` passa `-k pt-br` ao QEMU. O terminal VGA ainda não oferece suporte
 Unicode geral para acentos.
 
-Comandos disponíveis: `help`, `clear`, `echo`, `about`, `ls`, `cd`, `pwd`,
+O escalonador usa o PIT a 100 Hz para alternar tarefas de kernel em uma CPU.
+`parallel` inicia duas tarefas de cálculo concorrentes e `tasks` mostra quantas
+continuam ativas. Código do kernel pode criar tarefas com `task_create()` e
+ceder a CPU com `task_yield()`. As tarefas compartilham memória e executam no
+mesmo núcleo; APIs de dispositivos e subsistemas com estado global não devem
+ser chamadas por tarefas concorrentes sem sincronização.
+
+Comandos disponíveis: `help`, `clear`, `echo`, `about`, `tasks`, `parallel`, `ls`, `cd`, `pwd`,
 `mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.

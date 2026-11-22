@@ -37,16 +37,19 @@ KERNEL_IMAGE ?= kernel-cpython.elf
 
 all: $(KERNEL_IMAGE)
 
-$(KERNEL_IMAGE) kernel.elf: boot.o $(CPYTHON_KERNEL_OBJECT) gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot.o $(CPYTHON_KERNEL_OBJECT) gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
+$(KERNEL_IMAGE) kernel.elf: boot.o scheduler.o $(CPYTHON_KERNEL_OBJECT) gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot.o scheduler.o $(CPYTHON_KERNEL_OBJECT) gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
 
 boot.o: boot.s
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-kernel.o: kernel.c third_party/cpython/ports/maios/cpython_port.h
+scheduler.o: scheduler.c scheduler.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+kernel.o: kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
-$(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.h
+$(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
@@ -118,7 +121,7 @@ run: $(KERNEL_IMAGE) ext4-2g.img
 	qemu-system-i386 -cpu max -k pt-br -kernel $(KERNEL_IMAGE) -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070
 
 clean:
-	rm -f boot.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf kernel-cpython.elf
+	rm -f boot.o scheduler.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf kernel-cpython.elf
 	rm -rf build/bearssl
 	rm -rf $(CPYTHON_BUILD)
 	$(MAKE) -C $(MICROPYTHON_PORT) clean

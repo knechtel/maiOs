@@ -5,6 +5,7 @@
 #include "net.h"
 #include "gitpack.h"
 #include "cpython_port.h"
+#include "scheduler.h"
 
 int maios_sqlite_shell(const char *filename);
 
@@ -18,6 +19,7 @@ static size_t cursor_y;
 static uint8_t color = VGA_COLOR;
 static int disk_ready;
 static int network_stack_ready;
+static volatile unsigned int parallel_finished;
 
 static int streq(const char *left, const char *right);
 static void print(const char *text);
@@ -45,6 +47,18 @@ int maios_poll_keyboard_interrupt(void)
 
 void maios_clear_keyboard_interrupt(void) { keyboard_interrupt = 0; }
 static void write_interactive(const char *name);
+
+static void parallel_worker(void *argument)
+{
+    unsigned int id = (unsigned int)(uintptr_t)argument;
+    volatile uint32_t value = id + 1;
+    for (uint32_t i = 0; i < 2000000; ++i) {
+        value = value * 1664525u + 1013904223u;
+        if ((i & 0x3fff) == 0) task_yield();
+    }
+    (void)value;
+    ++parallel_finished;
+}
 
 int maios_python_read_char(void);
 void maios_python_write_char(char value);
@@ -710,6 +724,8 @@ static void show_help(void)
         "  rmdir NOME apaga um diretorio vazio",
         "  python     inicia o REPL CPython",
         "  python ARQUIVO.py executa um script do ext4",
+        "  parallel   executa duas tarefas concorrentes",
+        "  tasks      mostra tarefas do kernel em execucao",
         "  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa",
         "  cat NOME   mostra um arquivo do disco",
         "  halt       para a CPU",
@@ -734,6 +750,18 @@ static void execute_command(char *command)
 
     if (streq(command, "help")) {
         show_help();
+    } else if (streq(command, "tasks")) {
+        print("Tarefas ativas: "); print_u32(task_count()); put_char('\n');
+    } else if (streq(command, "parallel")) {
+        parallel_finished = 0;
+        if (task_create(parallel_worker, (void *)(uintptr_t)0) < 0 ||
+            task_create(parallel_worker, (void *)(uintptr_t)1) < 0) {
+            print("Nao foi possivel criar as tarefas.\n");
+        } else {
+            print("Duas tarefas concorrentes iniciadas...\n");
+            while (parallel_finished < 2) task_yield();
+            print("Tarefas concluidas.\n");
+        }
     } else if (streq(command, "clear")) {
         clear_screen();
     } else if (starts_with(command, "echo ")) {
@@ -1208,6 +1236,8 @@ void kernel_main(void)
     } else {
         print("Placa E1000 nao encontrada ou falha na inicializacao.\n");
     }
+    scheduler_init();
+    print("Escalonador de tarefas ativo (timer 100 Hz).\n");
     prompt();
 
     for (;;) {
