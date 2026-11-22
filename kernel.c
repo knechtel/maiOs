@@ -20,8 +20,14 @@ static uint8_t color = VGA_COLOR;
 static int disk_ready;
 static int network_stack_ready;
 static volatile unsigned int parallel_finished;
+static volatile uint8_t background_python_state;
+static volatile int background_python_result;
+static volatile uint8_t background_python_stop;
+static char background_python_filename[64];
+static uint8_t interactive_write_buffer[64u * 1024u];
 
 static int streq(const char *left, const char *right);
+static int starts_with(const char *text, const char *prefix);
 static void print(const char *text);
 static void put_char(char c);
 static char read_key(void);
@@ -33,6 +39,7 @@ static volatile uint8_t keyboard_interrupt;
 /* Network waits run in C, so they must poll the PS/2 controller too. */
 int maios_poll_keyboard_interrupt(void)
 {
+    if (background_python_state == 1) return 0;
     while (inb(0x64) & 1) {
         uint8_t scan = inb(0x60);
         if (scan == 0xE0) continue;
@@ -58,6 +65,41 @@ static void parallel_worker(void *argument)
     }
     (void)value;
     ++parallel_finished;
+}
+
+int maios_background_server_active(void)
+{
+    return background_python_state == 1;
+}
+
+static void background_python_worker(void *argument)
+{
+    (void)argument;
+    int result = maios_cpython_initialize();
+    if (result == 0) result = maios_cpython_run_file(background_python_filename);
+    background_python_result = result;
+    background_python_state = 2;
+}
+
+static void reap_background_python(void)
+{
+    if (background_python_state != 2) return;
+    if (background_python_stop) print("Servidor Python encerrado.\n");
+    else if (background_python_result == 0) print("Script Python em segundo plano terminou.\n");
+    else print("Script Python em segundo plano terminou com erro.\n");
+    background_python_stop = 0;
+    background_python_state = 0;
+}
+
+static int network_command_conflicts_with_server(const char *command)
+{
+    if (background_python_state != 1) return 0;
+    return streq(command, "sqlite3") || starts_with(command, "sqlite3 ") ||
+           streq(command, "ping") || starts_with(command, "ping ") ||
+           streq(command, "dhcp") || streq(command, "dns") || starts_with(command, "dns ") ||
+           starts_with(command, "tcp ") || starts_with(command, "git ") ||
+           starts_with(command, "curl ") || starts_with(command, "https ") ||
+           starts_with(command, "https-post ") || starts_with(command, "https-save ");
 }
 
 int maios_python_read_char(void);
@@ -227,11 +269,13 @@ static void put_char(char c)
 
 int maios_python_read_char(void)
 {
+    if (background_python_state == 1) return 4;
     return read_key();
 }
 
 void maios_python_write_char(char value)
 {
+    if (background_python_state == 1) return;
     put_char(value);
 }
 
@@ -724,6 +768,8 @@ static void show_help(void)
         "  rmdir NOME apaga um diretorio vazio",
         "  python     inicia o REPL CPython",
         "  python ARQUIVO.py executa um script do ext4",
+        "  python ARQUIVO.py & inicia o script em segundo plano",
+        "  python-stop encerra um servidor Python em segundo plano",
         "  parallel   executa duas tarefas concorrentes",
         "  tasks      mostra tarefas do kernel em execucao",
         "  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa",
@@ -746,12 +792,26 @@ static void show_help(void)
 
 static void execute_command(char *command)
 {
+    reap_background_python();
     if (*command == '\0') return;
+    if (network_command_conflicts_with_server(command)) {
+        print("Comando indisponivel enquanto o servidor Python usa CPython ou a rede.\n");
+        return;
+    }
 
     if (streq(command, "help")) {
         show_help();
     } else if (streq(command, "tasks")) {
         print("Tarefas ativas: "); print_u32(task_count()); put_char('\n');
+        if (background_python_state == 1) print("Python em segundo plano: ativo.\n");
+    } else if (streq(command, "python-stop")) {
+        if (background_python_state == 1) {
+            background_python_stop = 1;
+            net_request_interrupt();
+            print("Solicitado o encerramento do servidor Python.\n");
+        } else {
+            print("Nenhum script Python em segundo plano ativo.\n");
+        }
     } else if (streq(command, "parallel")) {
         parallel_finished = 0;
         if (task_create(parallel_worker, (void *)(uintptr_t)0) < 0 ||
@@ -772,7 +832,8 @@ static void execute_command(char *command)
     } else if (streq(command, "about")) {
         print("maiOs - kernel experimental de 32 bits\nExecutando no modo protegido x86.\n");
     } else if (streq(command,"python")) {
-        if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
+        if (background_python_state == 1) print("CPython esta ocupado pelo script em segundo plano.\n");
+        else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
         else if (maios_cpython_repl() < 0) print("O REPL do CPython foi interrompido por erro.\n");
     } else if (streq(command, "sqlite3") || starts_with(command, "sqlite3 ")) {
         const char *filename = streq(command, "sqlite3") ? "maios.db" : command + 8;
@@ -780,10 +841,28 @@ static void execute_command(char *command)
         else if (!valid_file_name(filename)) print("Uso: sqlite3 [ARQUIVO] (nome simples, sem caminhos).\n");
         else if (maios_sqlite_shell(filename) < 0) print("Nao foi possivel abrir ou fechar o banco SQLite.\n");
     } else if (starts_with(command,"python ")) {
-        const char *filename=command+7;
-        if(!disk_ready)print("Disco indisponivel.\n");
-        else if(!valid_file_name(filename))print("Uso: python ARQUIVO.py (arquivo no diretorio atual).\n");
-        else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
+        char *filename=command+7;
+        size_t length=str_length(filename);
+        while(length&&filename[length-1]==' ')filename[--length]='\0';
+        int background=length&&filename[length-1]=='&';
+        if(background){
+            filename[--length]='\0';
+            while(length&&filename[length-1]==' ')filename[--length]='\0';
+        }
+        if (background_python_state == 1) print("CPython esta ocupado por outro script.\n");
+        else if(!disk_ready)print("Disco indisponivel.\n");
+        else if(!valid_file_name(filename))print("Uso: python ARQUIVO.py [&] (arquivo no diretorio atual).\n");
+        else if(background){
+            for(size_t i=0;i<=length;i++)background_python_filename[i]=filename[i];
+            background_python_stop=0;
+            background_python_state=1;
+            if(task_create(background_python_worker,0)<0){
+                background_python_state=0;
+                print("Nao foi possivel criar a tarefa Python.\n");
+            }else{
+                print("Script Python iniciado em segundo plano. Use python-stop para encerra-lo.\n");
+            }
+        }else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
         else if (maios_cpython_run_file(filename) < 0) print("Nao foi possivel carregar ou executar o script Python.\n");
     } else if (starts_with(command, "mkdir ")) {
         int result = disk_ready ? create_directory(command + 6) : -4;
@@ -1125,7 +1204,7 @@ static char read_key(void)
 {
     static uint8_t left_shift, right_shift, left_control, right_control, altgr, caps_lock, extended;
     for (;;) {
-        if (network_stack_ready) net_poll();
+        if (network_stack_ready && !maios_background_server_active()) net_poll();
         if (inb(0x64) & 1) {
             uint8_t scan = inb(0x60);
             if (scan == 0xE0) { extended = 1; continue; }
@@ -1159,40 +1238,25 @@ static char read_key(void)
 static void write_interactive(const char *name)
 {
     char line[INPUT_SIZE];
-    uint8_t block[1024];
     size_t line_length = 0;
     size_t used = 0;
-    uint32_t written = 0;
-    uint32_t block_index = 0;
 
-    if (!ext4_write_begin(name)) { print("Nao foi possivel abrir o arquivo para gravacao.\n"); return; }
     print("Digite o texto; finalize com um ponto sozinho em uma linha.\n");
     for (;;) {
         char key = read_key();
         if (key == '\n') {
             put_char('\n');
             if (line_length == 1 && line[0] == '.') {
-                if (used && !ext4_write_block(block_index, block, used)) {
-                    ext4_write_finish(written);
-                    print("Erro ao gravar o arquivo.\n");
-                    return;
-                }
-                written += (uint32_t)used;
-                if (ext4_write_finish(written)) print("Arquivo salvo no ext4.\n");
-                else print("Erro ao finalizar o arquivo.\n");
+                if (ext4_write(name, interactive_write_buffer, used)) print("Arquivo salvo no ext4.\n");
+                else print("Erro ao gravar o arquivo.\n");
+                return;
+            }
+            if (used + line_length + 1 > sizeof(interactive_write_buffer)) {
+                print("Texto excede o limite de 64 KiB.\n");
                 return;
             }
             for (size_t i = 0; i <= line_length; ++i) {
-                block[used++] = i == line_length ? '\n' : (uint8_t)line[i];
-                if (used == sizeof(block)) {
-                    if (!ext4_write_block(block_index++, block, used)) {
-                        ext4_write_finish(written);
-                        print("Erro ao gravar o arquivo.\n");
-                        return;
-                    }
-                    written += sizeof(block);
-                    used = 0;
-                }
+                interactive_write_buffer[used++] = i == line_length ? '\n' : (uint8_t)line[i];
             }
             line_length = 0;
         } else if (key == '\b') {

@@ -8,5 +8,7 @@ int task_create(task_entry_t entry, void *argument);
 void task_yield(void);
 unsigned int task_count(void);
 void scheduler_init(void);
+void scheduler_critical_enter(void);
+void scheduler_critical_leave(void);
 
 #endif

@@ -85,7 +85,7 @@ micropython-force:
 gitpack.o: gitpack.c gitpack.h ext4.h third_party/bearssl/inc/bearssl.h
 	$(CC) $(CFLAGS) -Ithird_party/bearssl/port -Ithird_party/bearssl/inc -c $< -o $@
 
-ext4.o: ext4.c ext4.h
+ext4.o: ext4.c ext4.h scheduler.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
 e1000.o: e1000.c e1000.h

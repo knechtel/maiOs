@@ -2,7 +2,7 @@
 
 extern int maios_poll_keyboard_interrupt(void);
 extern void maios_clear_keyboard_interrupt(void);
-static int interrupt_pending;
+static volatile int interrupt_pending;
 
 int net_interrupt_pending(void) { return interrupt_pending; }
 void net_clear_interrupt(void)
@@ -10,6 +10,7 @@ void net_clear_interrupt(void)
     interrupt_pending=0;
     maios_clear_keyboard_interrupt();
 }
+void net_request_interrupt(void) { interrupt_pending=1; }
 #include "e1000.h"
 
 #define ETH_FRAME_MAX 1518u

@@ -1,4 +1,5 @@
 #include "ext4.h"
+#include "scheduler.h"
 
 #define SECTOR_SIZE 512u
 #define BLOCK_SIZE 1024u
@@ -230,7 +231,7 @@ triple_indirect:
     *result=data;return data!=0;
 }
 
-int ext4_mount(void){
+static int ext4_mount_impl(void){
     uint8_t sec[512]; mounted=0;
     if(!sector_io(2,sec,0))return 0;
     copy(super,sec,512);
@@ -413,8 +414,8 @@ static int remove_entry(const char *name,int want_directory){
     return free_inode(ino,is_directory);
 }
 
-int ext4_unlink(const char *name){return remove_entry(name,0);}
-int ext4_rmdir(const char *name){return remove_entry(name,1);}
+static int ext4_unlink_impl(const char *name){return remove_entry(name,0);}
+static int ext4_rmdir_impl(const char *name){return remove_entry(name,1);}
 
 static int delete_directory_contents(void){
     ext4_entry_t entries[16];
@@ -431,7 +432,7 @@ static int delete_directory_contents(void){
     }
 }
 
-int ext4_delete(const char *name){
+static int ext4_delete_impl(const char *name){
     uint32_t ino;uint8_t type;
     if(!mounted||!name||!name[0]||same(name,".")||same(name,"..")||active_inode||
        !entry_find(name,&ino,&type)||!ext4_chdir(name))return 0;
@@ -440,7 +441,7 @@ int ext4_delete(const char *name){
     return ext4_rmdir(name);
 }
 
-int ext4_rename(const char *old_name,const char *new_name){
+static int ext4_rename_impl(const char *old_name,const char *new_name){
     uint32_t ino,destination;uint8_t type,raw[128];
     if(!mounted||!old_name||!new_name||!old_name[0]||!new_name[0]||
        same(old_name,".")||same(old_name,"..")||same(new_name,".")||same(new_name,"..")||
@@ -454,7 +455,7 @@ int ext4_rename(const char *old_name,const char *new_name){
     return 0;
 }
 
-int ext4_list(ext4_entry_t *entries,size_t capacity){
+static int ext4_list_impl(ext4_entry_t *entries,size_t capacity){
     uint8_t raw[128],data[BLOCK_SIZE];if(!mounted||!inode_read(cwd_inode,raw))return -1;int count=0;
     uint32_t blocks=(rd32(raw+4)+BLOCK_SIZE-1)/BLOCK_SIZE;
     for(uint32_t b=0;b<blocks;b++){
@@ -464,7 +465,7 @@ int ext4_list(ext4_entry_t *entries,size_t capacity){
     }
     return count;
 }
-int ext4_chdir(const char *path){
+static int ext4_chdir_impl(const char *path){
     if(!mounted||!path||!*path)return 0;
     if(*path=='/'){cwd_depth=0;cwd_inode=ROOT_INODE;cwd_stack[0]=ROOT_INODE;}
     while(*path){
@@ -482,7 +483,7 @@ int ext4_chdir(const char *path){
     }
     return 1;
 }
-int ext4_pwd(char *buffer,size_t capacity){
+static int ext4_pwd_impl(char *buffer,size_t capacity){
     size_t pos=0;if(!capacity)return 0;buffer[pos++]='/';
     for(uint32_t i=0;i<cwd_depth;i++){
         for(size_t j=0;cwd_names[i][j];j++){if(pos+1>=capacity)return 0;buffer[pos++]=cwd_names[i][j];}
@@ -490,17 +491,17 @@ int ext4_pwd(char *buffer,size_t capacity){
     }
     buffer[pos]=0;return 1;
 }
-int ext4_read_start(const char *name,uint32_t *size){
+static int ext4_read_start_impl(const char *name,uint32_t *size){
     uint32_t ino;uint8_t type;
     if(!mounted||!entry_find(name,&ino,&type)||type==2||!inode_read(ino,read_inode_data))return 0;
     read_inode=ino;*size=rd32(read_inode_data+4);return 1;
 }
-int ext4_read_block(uint32_t index,uint8_t *data){
+static int ext4_read_block_impl(uint32_t index,uint8_t *data){
     uint32_t block;
     return read_inode&&inode_map_block(read_inode,read_inode_data,index,0,&block)&&block_read(block,data);
 }
-void ext4_read_end(void){read_inode=0;zero(read_inode_data,sizeof(read_inode_data));}
-int ext4_write_begin(const char *name){
+static void ext4_read_end_impl(void){read_inode=0;zero(read_inode_data,sizeof(read_inode_data));}
+static int ext4_write_begin_impl(const char *name){
     uint32_t ino;uint8_t type;
     if(!mounted||active_inode)return 0;
     if(entry_find(name,&ino,&type)) {
@@ -515,18 +516,18 @@ int ext4_write_begin(const char *name){
     wr32(active_inode_data+4,0);
     return 1;
 }
-int ext4_write_block(uint32_t index,const uint8_t *data,size_t size){
+static int ext4_write_block_impl(uint32_t index,const uint8_t *data,size_t size){
     uint32_t block;uint8_t buffer[BLOCK_SIZE];
     if(!active_inode||index>=MAX_FILE_BLOCKS||size>BLOCK_SIZE||!inode_map_block(active_inode,active_inode_data,index,1,&block))return 0;
     zero(buffer,sizeof(buffer));copy(buffer,data,size);return block_write(block,buffer);
 }
-int ext4_write_finish(uint32_t size){
+static int ext4_write_finish_impl(uint32_t size){
     if(!active_inode)return 0;
     wr32(active_inode_data+4,size);
     int ok=inode_write(active_inode,active_inode_data);
     active_inode=0;zero(active_inode_data,sizeof(active_inode_data));return ok;
 }
-int ext4_write(const char *name,const uint8_t *data,size_t size){
+static int ext4_write_impl(const char *name,const uint8_t *data,size_t size){
     if(size>MAX_BLOCKS*BLOCK_SIZE||!ext4_write_begin(name))return 0;
     uint32_t blocks=(size+BLOCK_SIZE-1)/BLOCK_SIZE;
     for(uint32_t i=0;i<blocks;i++){
@@ -535,7 +536,7 @@ int ext4_write(const char *name,const uint8_t *data,size_t size){
     }
     return ext4_write_finish((uint32_t)size);
 }
-int ext4_mkdir(const char *name){
+static int ext4_mkdir_impl(const char *name){
     if(!mounted)return 0;
     uint32_t exists,ino,blk;uint8_t type,raw[128],dir[BLOCK_SIZE];
     if(entry_find(name,&exists,&type))return 0;
@@ -545,3 +546,35 @@ int ext4_mkdir(const char *name){
     if(!block_write(blk,dir)||!inode_write(ino,raw)||!dir_add(cwd_inode,name,ino,2))return 0;
     uint8_t parent[128];if(inode_read(cwd_inode,parent)){wr16(parent+26,rd16(parent+26)+1);inode_write(cwd_inode,parent);}return 1;
 }
+
+int ext4_mount(void){scheduler_critical_enter();int ok=ext4_mount_impl();scheduler_critical_leave();return ok;}
+int ext4_unlink(const char *name){scheduler_critical_enter();int ok=ext4_unlink_impl(name);scheduler_critical_leave();return ok;}
+int ext4_rmdir(const char *name){scheduler_critical_enter();int ok=ext4_rmdir_impl(name);scheduler_critical_leave();return ok;}
+int ext4_delete(const char *name){scheduler_critical_enter();int ok=ext4_delete_impl(name);scheduler_critical_leave();return ok;}
+int ext4_rename(const char *old_name,const char *new_name){scheduler_critical_enter();int ok=ext4_rename_impl(old_name,new_name);scheduler_critical_leave();return ok;}
+int ext4_list(ext4_entry_t *entries,size_t capacity){scheduler_critical_enter();int count=ext4_list_impl(entries,capacity);scheduler_critical_leave();return count;}
+int ext4_chdir(const char *path){scheduler_critical_enter();int ok=ext4_chdir_impl(path);scheduler_critical_leave();return ok;}
+int ext4_pwd(char *buffer,size_t capacity){scheduler_critical_enter();int ok=ext4_pwd_impl(buffer,capacity);scheduler_critical_leave();return ok;}
+
+int ext4_read_start(const char *name,uint32_t *size){
+    scheduler_critical_enter();
+    if(!ext4_read_start_impl(name,size)){scheduler_critical_leave();return 0;}
+    return 1;
+}
+int ext4_read_block(uint32_t index,uint8_t *data){return ext4_read_block_impl(index,data);}
+void ext4_read_end(void){if(read_inode){ext4_read_end_impl();scheduler_critical_leave();}}
+
+int ext4_write_begin(const char *name){
+    scheduler_critical_enter();
+    if(!ext4_write_begin_impl(name)){scheduler_critical_leave();return 0;}
+    return 1;
+}
+int ext4_write_block(uint32_t index,const uint8_t *data,size_t size){return ext4_write_block_impl(index,data,size);}
+int ext4_write_finish(uint32_t size){
+    if(!active_inode)return 0;
+    int ok=ext4_write_finish_impl(size);scheduler_critical_leave();return ok;
+}
+int ext4_write(const char *name,const uint8_t *data,size_t size){
+    scheduler_critical_enter();int ok=ext4_write_impl(name,data,size);scheduler_critical_leave();return ok;
+}
+int ext4_mkdir(const char *name){scheduler_critical_enter();int ok=ext4_mkdir_impl(name);scheduler_critical_leave();return ok;}

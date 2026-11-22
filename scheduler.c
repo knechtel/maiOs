@@ -2,7 +2,7 @@
 #include "scheduler.h"
 
 #define MAX_TASKS 8
-#define STACK_SIZE 8192
+#define STACK_SIZE 65536
 #define TASK_UNUSED 0
 #define TASK_READY 1
 #define TASK_RUNNING 2
@@ -19,6 +19,8 @@ typedef struct {
 static task_t tasks[MAX_TASKS];
 static unsigned int current_task;
 static unsigned int next_id = 1;
+static volatile unsigned int critical_depth;
+static uint32_t critical_initial_flags;
 
 typedef struct __attribute__((packed)) {
     uint16_t offset_low;
@@ -122,6 +124,25 @@ void task_yield(void)
     __asm__ volatile("int $0x30" : : : "memory");
 }
 
+void scheduler_critical_enter(void)
+{
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    if (critical_depth++ == 0) critical_initial_flags = flags;
+    if (flags & 0x200) __asm__ volatile("sti" : : : "memory");
+}
+
+void scheduler_critical_leave(void)
+{
+    uint32_t flags;
+    __asm__ volatile("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
+    if (critical_depth) --critical_depth;
+    if (critical_depth == 0 && (critical_initial_flags & 0x200))
+        __asm__ volatile("sti" : : : "memory");
+    else if (critical_depth != 0 && (flags & 0x200))
+        __asm__ volatile("sti" : : : "memory");
+}
+
 unsigned int task_count(void)
 {
     unsigned int count = 0;
@@ -134,6 +155,7 @@ unsigned int task_count(void)
 uint32_t *scheduler_tick(uint32_t *saved_stack, uint32_t hardware_irq)
 {
     if (hardware_irq) outb(0x20, 0x20);
+    if (critical_depth) return saved_stack;
     tasks[current_task].stack = saved_stack;
     if (tasks[current_task].state == TASK_RUNNING)
         tasks[current_task].state = TASK_READY;

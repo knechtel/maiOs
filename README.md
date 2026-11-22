@@ -15,7 +15,7 @@ mesmo núcleo; APIs de dispositivos e subsistemas com estado global não devem
 ser chamadas por tarefas concorrentes sem sincronização.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `tasks`, `parallel`, `ls`, `cd`, `pwd`,
-`mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
+`mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `python-stop`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
@@ -45,6 +45,14 @@ Pressione `Ctrl+D` para voltar ao shell. Para executar um arquivo:
 write exemplo.py print("oi do maiOs")
 python exemplo.py
 ```
+
+Para manter um servidor Python ativo enquanto usa o prompt, inicie o script
+com `python server.py &`. O comando `python-stop` solicita que o servidor em
+segundo plano pare. Enquanto ele estiver ativo, o CPython e a rede ficam
+reservados para essa tarefa; comandos locais do shell continuam disponíveis.
+Saída Python fica oculta para não sobrescrever a linha de comando. Comandos de
+rede e `sqlite3` ficam indisponíveis até o servidor parar. `write` coleta o
+texto antes de gravar no ext4 e aceita até 64 KiB.
 
 O comando `sqlite3 [ARQUIVO]` abre um terminal SQL interativo; sem argumento,
 usa `maios.db`. Encerre com `.quit` ou Ctrl+D. O mesmo banco fica disponível no
@@ -117,6 +125,8 @@ As sessões existem somente enquanto o processo do servidor estiver ativo; ao
 atingir 16 sessões, uma sessão antiga é substituída. `session()` só pode ser
 chamada durante o callback de uma requisição. Durante a execução do servidor,
 `Ctrl+C` interrompe `webserver.serve()` e retorna ao terminal do maiOs.
+Para execução em segundo plano, use `python server.py &` e encerre com
+`python-stop`.
 
 Com `make run`, o QEMU encaminha `127.0.0.1:8070` do host para o maiOs. Acesse
 `http://127.0.0.1:8070/`. O callback recebe método, caminho e corpo como `bytes`
