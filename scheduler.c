@@ -21,6 +21,7 @@ static unsigned int current_task;
 static unsigned int next_id = 1;
 static volatile unsigned int critical_depth;
 static uint32_t critical_initial_flags;
+static volatile uint32_t pit_ticks;
 
 typedef struct __attribute__((packed)) {
     uint16_t offset_low;
@@ -151,9 +152,15 @@ unsigned int task_count(void)
     return count;
 }
 
+uint32_t scheduler_ticks(void)
+{
+    return pit_ticks;
+}
+
 /* Chamado pelo IRQ0 stub: recebe a pilha salva por pushal e devolve a proxima. */
 uint32_t *scheduler_tick(uint32_t *saved_stack, uint32_t hardware_irq)
 {
+    if (hardware_irq) ++pit_ticks;
     if (hardware_irq) outb(0x20, 0x20);
     if (critical_depth) return saved_stack;
     tasks[current_task].stack = saved_stack;

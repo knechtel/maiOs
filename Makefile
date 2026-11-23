@@ -31,9 +31,11 @@ CPYTHON_FREEZER = $(abspath $(CPYTHON_HOST_BUILD)/Programs/_freeze_module)
 CPYTHON_RUNTIME_SOURCES = $(wildcard $(CPYTHON_PORT)/runtime/*.c) $(wildcard third_party/micropython/lib/libm_dbl/*.c)
 CPYTHON_LIBGCC = $(shell $(CC) -m32 -print-libgcc-file-name)
 CPYTHON_KERNEL_OBJECT = build/cpython-kernel.o
+PYTHON_STDLIB_ZIP = build/python311.zip
+PYTHON_WHEELS := $(wildcard third_party/django_wheels/*.whl)
 KERNEL_IMAGE ?= kernel-cpython.elf
 
-.PHONY: all run clean micropython-force
+.PHONY: all run clean micropython-force install-python-stdlib
 
 all: $(KERNEL_IMAGE)
 
@@ -53,12 +55,12 @@ $(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
-$(CPYTHON_STAMP): $(CPYTHON_PORT)/Makefile $(CPYTHON_PORT)/config.site $(CPYTHON_PORT)/Modules.Setup.local.example third_party/cpython/Include/patchlevel.h third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in third_party/cpython/Tools/scripts/freeze_modules.py
+$(CPYTHON_STAMP): $(CPYTHON_PORT)/Makefile $(CPYTHON_PORT)/config.site $(CPYTHON_PORT)/Modules.Setup.local.example third_party/cpython/Include/patchlevel.h third_party/cpython/config.sub third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in third_party/cpython/Tools/scripts/freeze_modules.py
 	$(MAKE) -C $(CPYTHON_PORT) configure CC='$(CPYTHON_CC)' CFLAGS='$(CPYTHON_CFLAGS)' SYSROOT='$(CPYTHON_SYSROOT)' BUILD_DIR='$(abspath $(CPYTHON_BUILD))'
 	printf '%s\n' '_sqlite3 _sqlite/blob.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c ../../../third_party/sqlite/sqlite3_maios.c ../../../third_party/sqlite/maios_vfs.c' >> $(CPYTHON_BUILD)/Modules/Setup.local
 	@touch $@
 
-$(CPYTHON_HOST_STAMP): third_party/cpython/Include/patchlevel.h third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in
+$(CPYTHON_HOST_STAMP): third_party/cpython/Include/patchlevel.h third_party/cpython/config.sub third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in
 	@mkdir -p $(CPYTHON_HOST_BUILD)
 	cd $(CPYTHON_HOST_BUILD) && ../../third_party/cpython/configure --without-ensurepip
 	@touch $@
@@ -66,10 +68,13 @@ $(CPYTHON_HOST_STAMP): third_party/cpython/Include/patchlevel.h third_party/cpyt
 $(CPYTHON_FREEZER): $(CPYTHON_HOST_STAMP)
 	$(MAKE) -C $(CPYTHON_HOST_BUILD) -j2 Programs/_freeze_module
 
-$(CPYTHON_ARCHIVE): $(CPYTHON_STAMP) $(CPYTHON_FREEZER) third_party/cpython/Include/patchlevel.h third_party/cpython/Python/pylifecycle.c third_party/cpython/Python/frozen.c third_party/cpython/Lib/json/__init__.py third_party/cpython/Lib/json/decoder.py third_party/cpython/Lib/json/encoder.py third_party/cpython/Lib/json/scanner.py third_party/cpython/Lib/re/__init__.py third_party/cpython/Lib/re/_compiler.py third_party/cpython/Lib/re/_parser.py third_party/cpython/Lib/re/_constants.py third_party/cpython/Lib/re/_casefix.py third_party/cpython/Lib/enum.py third_party/cpython/Lib/copyreg.py third_party/cpython/Modules/_json.c $(CPYTHON_PORT)/webserver.c $(CPYTHON_PORT)/maiosposix.c $(CPYTHON_PORT)/maiosfs.c $(CPYTHON_PORT)/maios_time.c third_party/sqlite/sqlite3_maios.c third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h third_party/sqlite/maios_vfs.c
+$(CPYTHON_ARCHIVE): $(CPYTHON_STAMP) $(CPYTHON_FREEZER) third_party/cpython/Include/patchlevel.h third_party/cpython/Include/pyport.h third_party/cpython/Python/pylifecycle.c third_party/cpython/Python/frozen.c third_party/cpython/Lib/json/__init__.py third_party/cpython/Lib/json/decoder.py third_party/cpython/Lib/json/encoder.py third_party/cpython/Lib/json/scanner.py third_party/cpython/Lib/re/__init__.py third_party/cpython/Lib/re/_compiler.py third_party/cpython/Lib/re/_parser.py third_party/cpython/Lib/re/_constants.py third_party/cpython/Lib/enum.py third_party/cpython/Lib/copyreg.py third_party/cpython/Lib/select.py third_party/cpython/Lib/subprocess.py third_party/cpython/Modules/_json.c $(CPYTHON_PORT)/Modules.Setup.local.example $(CPYTHON_PORT)/maios_signal.c $(CPYTHON_PORT)/webserver.c $(CPYTHON_PORT)/maiosposix.c $(CPYTHON_PORT)/maiosfs.c $(CPYTHON_PORT)/maios_time.c third_party/sqlite/sqlite3_maios.c third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h third_party/sqlite/maios_vfs.c
 	cp $(CPYTHON_PORT)/Modules.Setup.local.example $(CPYTHON_BUILD)/Modules/Setup.local
 	printf '%s\n' '_sqlite3 _sqlite/blob.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c ../../../third_party/sqlite/sqlite3_maios.c ../../../third_party/sqlite/maios_vfs.c' >> $(CPYTHON_BUILD)/Modules/Setup.local
 	$(MAKE) -C $(CPYTHON_PORT) core BUILD_DIR='$(abspath $(CPYTHON_BUILD))' FREEZE_MODULE='$(CPYTHON_FREEZER)'
+
+$(PYTHON_STDLIB_ZIP): tools/package_python_stdlib.py third_party/cpython/Include/patchlevel.h third_party/cpython/Lib/hashlib.py third_party/cpython/Lib/select.py third_party/cpython/Lib/subprocess.py third_party/cpython/Lib/maios_wsgi.py third_party/cpython/ports/maios/stdlib/socket.py third_party/cpython/ports/maios/stdlib/zlib.py third_party/cpython/ports/maios/stdlib/_sysconfigdata__maios_.py $(PYTHON_WHEELS)
+	python3 tools/package_python_stdlib.py third_party/cpython/Lib $@ $(PYTHON_WHEELS) --overlay third_party/cpython/ports/maios/stdlib
 
 $(CPYTHON_RUNTIME): $(CPYTHON_STAMP) $(CPYTHON_PORT)/Makefile $(CPYTHON_RUNTIME_SOURCES)
 	$(MAKE) -C $(CPYTHON_PORT) runtime CC='$(CPYTHON_CC)' CFLAGS='$(CPYTHON_CFLAGS)' SYSROOT='$(CPYTHON_SYSROOT)' BUILD_DIR='$(abspath $(CPYTHON_BUILD))'
@@ -117,7 +122,10 @@ ext4-2g.img:
 	truncate -s 2G ext4-2g.img
 	mke2fs -q -F -t ext4 -b 1024 -O ^has_journal,^metadata_csum,^64bit,^extent,^flex_bg,^dir_index ext4-2g.img
 
-run: $(KERNEL_IMAGE) ext4-2g.img
+install-python-stdlib: ext4-2g.img $(PYTHON_STDLIB_ZIP)
+	python3 tools/install_python_stdlib.py ext4-2g.img $(PYTHON_STDLIB_ZIP) --demo examples/django_demo.py
+
+run: $(KERNEL_IMAGE) ext4-2g.img install-python-stdlib
 	qemu-system-i386 -cpu max -k pt-br -kernel $(KERNEL_IMAGE) -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070
 
 clean:

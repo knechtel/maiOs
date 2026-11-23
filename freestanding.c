@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MAIOS_HEAP_SIZE (16u * 1024u * 1024u)
+#define MAIOS_HEAP_SIZE (64u * 1024u * 1024u)
 #define MAIOS_HEAP_ALIGNMENT 16u
 #define MAIOS_HEAP_MAGIC 0x4D41494Fu
 #define MAIOS_ENOMEM 12
