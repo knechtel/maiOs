@@ -31,6 +31,7 @@ static int starts_with(const char *text, const char *prefix);
 static void print(const char *text);
 static void put_char(char c);
 static char read_key(void);
+static void prompt(void);
 static inline uint8_t inb(uint16_t port);
 
 static volatile uint8_t keyboard_ctrl_down;
@@ -318,6 +319,61 @@ static int starts_with(const char *text, const char *prefix)
         ++prefix;
     }
     return *prefix == '\0';
+}
+
+/* Completa apenas o primeiro token, que identifica o comando do terminal. */
+static size_t autocomplete_command(char *input, size_t length)
+{
+    static const char *commands[] = {
+        "about", "cat", "cd", "clear", "delete", "dhcp", "dns", "echo",
+        "git", "halt", "help", "https", "https-post", "https-save",
+        "ifconfig", "ls", "mkdir", "mv", "parallel", "ping", "pwd",
+        "python", "python-stop", "reboot", "rm", "rmdir", "sqlite3",
+        "tasks", "tcp", "write", "curl"
+    };
+    size_t token_length = 0;
+    while (token_length < length && input[token_length] != ' ') ++token_length;
+    if (token_length != length) return length;
+    input[length] = '\0';
+
+    size_t count = sizeof(commands) / sizeof(commands[0]);
+    const char *first = 0;
+    size_t matches = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (starts_with(commands[i], input)) {
+            if (!first) first = commands[i];
+            ++matches;
+        }
+    }
+    if (!matches) return length;
+
+    size_t common = str_length(first);
+    for (size_t i = 0; i < count; ++i) {
+        if (!starts_with(commands[i], input)) continue;
+        size_t j = token_length;
+        while (j < common && commands[i][j] == first[j]) ++j;
+        common = j;
+    }
+    while (token_length < common && length < INPUT_SIZE - 2) {
+        input[length] = first[token_length++];
+        put_char(input[length++]);
+        input[length] = '\0';
+    }
+    if (matches == 1 && length < INPUT_SIZE - 2) {
+        input[length++] = ' ';
+        put_char(' ');
+    } else if (matches > 1) {
+        put_char('\n');
+        for (size_t i = 0; i < count; ++i) {
+            if (!starts_with(commands[i], input)) continue;
+            print(commands[i]);
+            put_char(' ');
+        }
+        put_char('\n');
+        prompt();
+        for (size_t i = 0; i < length; ++i) put_char(input[i]);
+    }
+    return length;
 }
 
 static int create_directory(const char *name)
@@ -1317,6 +1373,8 @@ void kernel_main(void)
                 --length;
                 put_char('\b');
             }
+        } else if (key == '\t') {
+            length = autocomplete_command(input, length);
         } else if (key != '\t' && length < INPUT_SIZE - 1) {
             input[length++] = key;
             put_char(key);
