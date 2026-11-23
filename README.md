@@ -61,7 +61,7 @@ banco são limitados a 4 MiB e precisam ter nomes simples no diretório atual.
 Use o journal padrão `DELETE`; WAL não está disponível, e o VFS não oferece
 bloqueios para acesso concorrente ao mesmo banco.
 
-O kernel padrão usa CPython 3.11.9, compilado para i386 com um runtime freestanding.
+O kernel padrão usa CPython 3.11.18, compilado para i386 com um runtime freestanding.
 O interpretador suporta scripts do ext4, REPL e os módulos built-in descritos
 abaixo. `json` também está incluído: o pacote e seu acelerador `_json` ficam no
 binário, sem exigir arquivos de biblioteca no ext4. O comando `python` mantém a

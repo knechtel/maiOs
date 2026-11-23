@@ -53,12 +53,12 @@ $(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
-$(CPYTHON_STAMP): $(CPYTHON_PORT)/Makefile $(CPYTHON_PORT)/config.site $(CPYTHON_PORT)/Modules.Setup.local.example third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in third_party/cpython/Tools/scripts/freeze_modules.py
+$(CPYTHON_STAMP): $(CPYTHON_PORT)/Makefile $(CPYTHON_PORT)/config.site $(CPYTHON_PORT)/Modules.Setup.local.example third_party/cpython/Include/patchlevel.h third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in third_party/cpython/Tools/scripts/freeze_modules.py
 	$(MAKE) -C $(CPYTHON_PORT) configure CC='$(CPYTHON_CC)' CFLAGS='$(CPYTHON_CFLAGS)' SYSROOT='$(CPYTHON_SYSROOT)' BUILD_DIR='$(abspath $(CPYTHON_BUILD))'
 	printf '%s\n' '_sqlite3 _sqlite/blob.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c ../../../third_party/sqlite/sqlite3_maios.c ../../../third_party/sqlite/maios_vfs.c' >> $(CPYTHON_BUILD)/Modules/Setup.local
 	@touch $@
 
-$(CPYTHON_HOST_STAMP): third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in
+$(CPYTHON_HOST_STAMP): third_party/cpython/Include/patchlevel.h third_party/cpython/configure third_party/cpython/configure.ac third_party/cpython/Makefile.pre.in
 	@mkdir -p $(CPYTHON_HOST_BUILD)
 	cd $(CPYTHON_HOST_BUILD) && ../../third_party/cpython/configure --without-ensurepip
 	@touch $@
@@ -66,7 +66,7 @@ $(CPYTHON_HOST_STAMP): third_party/cpython/configure third_party/cpython/configu
 $(CPYTHON_FREEZER): $(CPYTHON_HOST_STAMP)
 	$(MAKE) -C $(CPYTHON_HOST_BUILD) -j2 Programs/_freeze_module
 
-$(CPYTHON_ARCHIVE): $(CPYTHON_STAMP) $(CPYTHON_FREEZER) third_party/cpython/Python/pylifecycle.c third_party/cpython/Python/frozen.c third_party/cpython/Lib/json/__init__.py third_party/cpython/Lib/json/decoder.py third_party/cpython/Lib/json/encoder.py third_party/cpython/Lib/json/scanner.py third_party/cpython/Lib/re/__init__.py third_party/cpython/Lib/re/_compiler.py third_party/cpython/Lib/re/_parser.py third_party/cpython/Lib/re/_constants.py third_party/cpython/Lib/re/_casefix.py third_party/cpython/Lib/enum.py third_party/cpython/Lib/copyreg.py third_party/cpython/Modules/_json.c $(CPYTHON_PORT)/webserver.c $(CPYTHON_PORT)/maiosposix.c $(CPYTHON_PORT)/maiosfs.c $(CPYTHON_PORT)/maios_time.c third_party/sqlite/sqlite3_maios.c third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h third_party/sqlite/maios_vfs.c
+$(CPYTHON_ARCHIVE): $(CPYTHON_STAMP) $(CPYTHON_FREEZER) third_party/cpython/Include/patchlevel.h third_party/cpython/Python/pylifecycle.c third_party/cpython/Python/frozen.c third_party/cpython/Lib/json/__init__.py third_party/cpython/Lib/json/decoder.py third_party/cpython/Lib/json/encoder.py third_party/cpython/Lib/json/scanner.py third_party/cpython/Lib/re/__init__.py third_party/cpython/Lib/re/_compiler.py third_party/cpython/Lib/re/_parser.py third_party/cpython/Lib/re/_constants.py third_party/cpython/Lib/re/_casefix.py third_party/cpython/Lib/enum.py third_party/cpython/Lib/copyreg.py third_party/cpython/Modules/_json.c $(CPYTHON_PORT)/webserver.c $(CPYTHON_PORT)/maiosposix.c $(CPYTHON_PORT)/maiosfs.c $(CPYTHON_PORT)/maios_time.c third_party/sqlite/sqlite3_maios.c third_party/sqlite/sqlite3.c third_party/sqlite/sqlite3.h third_party/sqlite/maios_vfs.c
 	cp $(CPYTHON_PORT)/Modules.Setup.local.example $(CPYTHON_BUILD)/Modules/Setup.local
 	printf '%s\n' '_sqlite3 _sqlite/blob.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c ../../../third_party/sqlite/sqlite3_maios.c ../../../third_party/sqlite/maios_vfs.c' >> $(CPYTHON_BUILD)/Modules/Setup.local
 	$(MAKE) -C $(CPYTHON_PORT) core BUILD_DIR='$(abspath $(CPYTHON_BUILD))' FREEZE_MODULE='$(CPYTHON_FREEZER)'
