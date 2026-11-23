@@ -135,6 +135,15 @@ e deve retornar `str` ou `bytes`. O corpo é lido conforme `Content-Length`, at�
 Respostas usam HTTP 200; requisições malformadas e erros do callback recebem
 400 e 500, respectivamente.
 
+O alvo `make install-python-stdlib` instala `/python311.zip` na imagem ext4 com
+CPython e os pacotes puros Django 5.2.19, asgiref 3.13.0 e sqlparse 0.6.1.
+`make run` também atualiza esse arquivo e instala o exemplo como `/django`.
+No terminal do maiOs, inicie a aplicação com `python django`; depois acesse
+`http://127.0.0.1:8070/` no host. A aplicação demonstra Django via WSGI e
+responde na rota `/`. O exemplo usa `USE_TZ=False`, pois a imagem ainda não
+inclui uma base de dados de fusos horários. Os wheels usados na compilação estão
+em `third_party/django_wheels/`.
+
 O driver suporta até 256 grupos ext4 com blocos de 1024 bytes. Ele não suporta
 journal, extents, checksums ou partições. A navegação por diretórios é limitada
 a 16 níveis. A imagem criada pelo Makefile desativa journal, extents e checksums.
