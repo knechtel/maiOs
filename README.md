@@ -1,6 +1,6 @@
 # Kernel mínimo em C no QEMU
 
-Este exemplo inicializa um kernel Multiboot 1 de 32 bits com um terminal
+Este exemplo inicializa um kernel x86_64 Multiboot/PVH com um terminal
 interativo de texto VGA. O kernel lê o teclado PS/2 e oferece comandos internos
 simples; o pequeno arquivo assembly prepara a pilha e chama `kernel_main`.
 O mapa do kernel segue ABNT2, com Shift, Caps Lock e AltGr (Alt direito).
@@ -21,6 +21,23 @@ de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
 O comando `help` pagina a lista; pressione qualquer tecla para avançar ou `q`
 para sair.
+
+O gerenciador de pacotes está sendo desenvolvido em etapas. A base local fica
+em `/var/lib/pacman/local.db`; `pacman -Q` lista os registros, `pacman -Qq`
+mostra somente os nomes, `pacman -Qi NOME` consulta um registro, `pacman -U
+ARQUIVO.mpk` instala um pacote local e `pacman -R NOME` remove um pacote.
+Pacotes maiOS atuais contêm um único arquivo, instalado em `/apps`; podem ser
+criados no host com `python3 tools/make_maios_package.py NOME VERSAO ARQUIVO
+SAIDA.mpk`. O formato é uma linha `MAIOSPKG1 nome versão arquivo` terminada
+por newline, seguida pelos bytes do arquivo. Por exemplo, para instalar um
+script Python, coloque o `.mpk` no diretório atual do maiOS, rode `pacman -U
+SAIDA.mpk`, depois `cd /apps` e `python arquivo.py`. Repositórios sincronizados,
+dependências e executáveis Linux ainda não são suportados.
+
+A base de boot agora transita do modo protegido de 32 bits para long mode,
+usa tabelas de páginas de 2 MiB e compila o kernel x86_64. A camada de syscalls
+continua incompleta: programas em ring 3, carregador ELF, isolamento por
+processo e chamadas Linux para arquivos e terminal ainda precisam ser portados.
 
 Para gravar várias linhas, use `write NOME`, digite o conteúdo e finalize com um
 ponto sozinho em uma linha. `cat NOME` lê os blocos do arquivo em sequência.
@@ -61,7 +78,7 @@ banco são limitados a 4 MiB e precisam ter nomes simples no diretório atual.
 Use o journal padrão `DELETE`; WAL não está disponível, e o VFS não oferece
 bloqueios para acesso concorrente ao mesmo banco.
 
-O kernel padrão usa CPython 3.11.18, compilado para i386 com um runtime freestanding.
+O kernel padrão usa CPython 3.11.18, compilado para x86_64 com um runtime freestanding.
 O interpretador suporta scripts do ext4, REPL e os módulos built-in descritos
 abaixo. `json` também está incluído: o pacote e seu acelerador `_json` ficam no
 binário, sem exigir arquivos de biblioteca no ext4. O comando `python` mantém a
@@ -225,8 +242,8 @@ cd ..
 
 ## Requisitos
 
-- GCC com suporte a compilação `-m32`
-- GNU `ld`, `make` e `qemu-system-i386`
+- GCC com suporte a compilação `-m64`
+- GNU `ld`, `make` e `qemu-system-x86_64`
 - `mke2fs` (pacote e2fsprogs), para criar `ext4-2g.img`
 - `python3`, para gerar as tabelas do runtime MicroPython
 

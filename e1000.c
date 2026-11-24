@@ -195,7 +195,7 @@ int e1000_init(uint8_t mac[6])
     uint32_t mmio_base = bar0 & ~0xFu;
     if (bar_type == 2) {
         uint32_t high = pci_read32(bus, device, function, 0x14);
-        if (high) return 0; /* This 32-bit kernel cannot map a BAR above 4 GiB. */
+        if (high) return 0; /* The current identity map covers MMIO below 4 GiB only. */
     } else if (bar_type != 0) {
         return 0;
     }

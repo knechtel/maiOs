@@ -13,10 +13,10 @@ typedef struct heap_block {
     struct heap_block *next;
     uint32_t magic;
     uint8_t free;
-    uint8_t reserved[3];
+    uint8_t reserved[11];
 } heap_block_t;
 
-_Static_assert(sizeof(heap_block_t) == MAIOS_HEAP_ALIGNMENT,
+_Static_assert(sizeof(heap_block_t) % MAIOS_HEAP_ALIGNMENT == 0,
                "heap block header must stay 16-byte aligned");
 
 static uint8_t maios_heap[MAIOS_HEAP_SIZE] __attribute__((aligned(MAIOS_HEAP_ALIGNMENT)));

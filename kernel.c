@@ -4,6 +4,7 @@
 #include "e1000.h"
 #include "net.h"
 #include "gitpack.h"
+#include "pacman.h"
 #include "cpython_port.h"
 #include "scheduler.h"
 
@@ -816,6 +817,10 @@ static void show_help(void)
         "  git refs HOST REPO lista referencias remotas",
         "  git fetch HOST REPO REF ARQUIVO recebe o pack e faz checkout",
         "  git clone URL [DIRETORIO] clona um repositorio",
+        "  pacman -Q lista pacotes instalados",
+        "  pacman -Qi NOME consulta um pacote instalado",
+        "  pacman -U ARQUIVO.mpk instala um pacote local maiOS",
+        "  pacman -R NOME remove um pacote instalado",
         "  sqlite3 [ARQUIVO] abre o terminal SQL interativo",
         "  mkdir NOME cria um diretorio no disco",
         "  delete NOME apaga um diretorio e todo seu conteudo",
@@ -859,6 +864,45 @@ static void execute_command(char *command)
 
     if (streq(command, "help")) {
         show_help();
+    } else if (streq(command, "pacman -Q") || streq(command, "pacman -Qq")) {
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else {
+            int result = pacman_list_installed(print, streq(command, "pacman -Qq"), 0);
+            if (result < 0) print("Erro ao ler a base local do pacman.\n");
+            else if (!result) print("Nenhum pacote registrado.\n");
+        }
+    } else if (starts_with(command, "pacman -Qi ") || starts_with(command, "pacman -Q ")) {
+        const char *name = command + (starts_with(command, "pacman -Qi ") ? 11 : 10);
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!*name) print("Uso: pacman -Qi NOME\n");
+        else {
+            int result = pacman_list_installed(print, 0, name);
+            if (result < 0) print("Erro ao ler a base local do pacman.\n");
+            else if (!result) { print("Pacote nao instalado: "); print(name); put_char('\n'); }
+        }
+    } else if (starts_with(command, "pacman -U ")) {
+        const char *archive = command + 10;
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!*archive) print("Uso: pacman -U ARQUIVO.mpk\n");
+        else {
+            int result = pacman_install_local(archive);
+            if (result == 1) print("Pacote instalado em /apps e registrado na base local.\n");
+            else if (result == -2) print("O pacote ja esta instalado.\n");
+            else if (result == -3) print("O arquivo de destino ja existe em /apps.\n");
+            else print("Falha ao instalar. O arquivo deve ser um pacote local MAIOSPKG1 valido.\n");
+        }
+    } else if (starts_with(command, "pacman -R ")) {
+        const char *name = command + 10;
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!*name) print("Uso: pacman -R NOME\n");
+        else {
+            int result = pacman_remove(name);
+            if (result == 1) print("Pacote removido.\n");
+            else if (result == 0) { print("Pacote nao instalado: "); print(name); put_char('\n'); }
+            else print("Falha ao remover o pacote.\n");
+        }
+    } else if (streq(command, "pacman") || starts_with(command, "pacman ")) {
+        print("Uso: pacman -Q | -Qq | -Qi NOME | -U ARQUIVO.mpk | -R NOME\n");
     } else if (streq(command, "tasks")) {
         print("Tarefas ativas: "); print_u32(task_count()); put_char('\n');
         if (background_python_state == 1) print("Python em segundo plano: ativo.\n");
@@ -888,7 +932,7 @@ static void execute_command(char *command)
     } else if (streq(command, "echo")) {
         put_char('\n');
     } else if (streq(command, "about")) {
-        print("maiOs - kernel experimental de 32 bits\nExecutando no modo protegido x86.\n");
+        print("maiOs - kernel experimental x86_64\nExecutando em long mode.\n");
     } else if (streq(command,"python")) {
         if (background_python_state == 1) print("CPython esta ocupado pelo script em segundo plano.\n");
         else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");

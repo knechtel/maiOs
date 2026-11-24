@@ -2,14 +2,14 @@ CC = gcc
 AS = gcc
 LD = ld
 AR = ar
-CFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -std=c11 -ffreestanding -fno-pie -fno-stack-protector \
+CFLAGS = -m64 -march=x86-64 -mno-red-zone -std=c11 -ffreestanding -fno-pie -fno-stack-protector \
          -fno-asynchronous-unwind-tables -Wall -Wextra -O2
-BEARSSL_CFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -std=c99 -ffreestanding -fno-pie \
+BEARSSL_CFLAGS = -m64 -march=x86-64 -mno-red-zone -std=c99 -ffreestanding -fno-pie \
                  -fno-stack-protector -fno-builtin -Os -Ithird_party/bearssl/port \
                  -Ithird_party/bearssl/inc \
                  -Ithird_party/bearssl/src -DBR_USE_URANDOM=0 -DBR_USE_UNIX_TIME=0
-ASFLAGS = -m32 -ffreestanding -fno-pie
-LDFLAGS = -m elf_i386 -T linker.ld
+ASFLAGS = -m64 -ffreestanding -fno-pie
+LDFLAGS = -m elf_x86_64 -T linker.ld
 BEARSSL_SOURCES := $(shell find third_party/bearssl/src -name '*.c')
 BEARSSL_OBJECTS := $(patsubst third_party/bearssl/src/%.c,build/bearssl/%.o,$(BEARSSL_SOURCES))
 MICROPYTHON_PORT = third_party/micropython/ports/maios
@@ -17,10 +17,10 @@ MICROPYTHON_LIBRARY = $(MICROPYTHON_PORT)/build/libmicropython-maios.a
 MICROPYTHON_GIT_TAG = v1.30.0-preview
 MICROPYTHON_GIT_HASH = c1c4e7b
 CPYTHON_PORT = third_party/cpython/ports/maios
-CPYTHON_BUILD = build/cpython-maios
+CPYTHON_BUILD = build/cpython-maios-x86_64
 CPYTHON_SYSROOT = $(CURDIR)/$(CPYTHON_PORT)/sysroot
-CPYTHON_CC = $(CC) -m32
-CPYTHON_CFLAGS = -m32 -march=i386 -mno-sse -mno-mmx -O2 -ffreestanding -fno-pie -fno-stack-protector -I$(CURDIR)/third_party/sqlite
+CPYTHON_CC = $(CC) -m64
+CPYTHON_CFLAGS = -m64 -march=x86-64 -mno-red-zone -O2 -ffreestanding -fno-pie -fno-stack-protector -I$(CURDIR)/third_party/sqlite
 CPYTHON_STAMP = $(CPYTHON_BUILD)/.configured
 CPYTHON_ARCHIVE = $(CPYTHON_BUILD)/libpython3.11.a
 CPYTHON_RUNTIME = $(CPYTHON_BUILD)/libmaiosrt.a
@@ -29,29 +29,40 @@ CPYTHON_HOST_BUILD = build/cpython-freeze-host
 CPYTHON_HOST_STAMP = $(CPYTHON_HOST_BUILD)/.configured
 CPYTHON_FREEZER = $(abspath $(CPYTHON_HOST_BUILD)/Programs/_freeze_module)
 CPYTHON_RUNTIME_SOURCES = $(wildcard $(CPYTHON_PORT)/runtime/*.c) $(wildcard third_party/micropython/lib/libm_dbl/*.c)
-CPYTHON_LIBGCC = $(shell $(CC) -m32 -print-libgcc-file-name)
+CPYTHON_LIBGCC = $(shell $(CC) -m64 -print-libgcc-file-name)
 CPYTHON_KERNEL_OBJECT = build/cpython-kernel.o
 PYTHON_STDLIB_ZIP = build/python311.zip
 PYTHON_WHEELS := $(wildcard third_party/django_wheels/*.whl)
 KERNEL_IMAGE ?= kernel-cpython.elf
+ARCH_STAMP = build/x86_64.stamp
 
 .PHONY: all run clean micropython-force install-python-stdlib
 
 all: $(KERNEL_IMAGE)
 
-$(KERNEL_IMAGE) kernel.elf: boot.o scheduler.o $(CPYTHON_KERNEL_OBJECT) gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot.o scheduler.o $(CPYTHON_KERNEL_OBJECT) gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
+$(ARCH_STAMP):
+	@mkdir -p $(dir $@)
+	@touch $@
 
-boot.o: boot.s
+$(KERNEL_IMAGE) kernel.elf: boot.o scheduler.o linux_compat.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot.o scheduler.o linux_compat.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
+
+boot.o: boot.s $(ARCH_STAMP)
 	$(AS) $(ASFLAGS) -c $< -o $@
 
-scheduler.o: scheduler.c scheduler.h
+scheduler.o: scheduler.c scheduler.h linux_compat.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.o: kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h
+pacman.o: pacman.c pacman.h ext4.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+linux_compat.o: linux_compat.c linux_compat.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+kernel.o: kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h pacman.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
-$(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h
+$(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h $(ARCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
@@ -87,28 +98,28 @@ $(MICROPYTHON_LIBRARY): micropython-force
 
 micropython-force:
 
-gitpack.o: gitpack.c gitpack.h ext4.h third_party/bearssl/inc/bearssl.h
+gitpack.o: gitpack.c gitpack.h ext4.h third_party/bearssl/inc/bearssl.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -Ithird_party/bearssl/port -Ithird_party/bearssl/inc -c $< -o $@
 
-ext4.o: ext4.c ext4.h scheduler.h
+ext4.o: ext4.c ext4.h scheduler.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-e1000.o: e1000.c e1000.h
+e1000.o: e1000.c e1000.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-net.o: net.c net.h e1000.h
+net.o: net.c net.h e1000.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-https.o: https.c net.h third_party/bearssl/inc/bearssl.h
+https.o: https.c net.h third_party/bearssl/inc/bearssl.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -Ithird_party/bearssl/port -Ithird_party/bearssl/inc -c $< -o $@
 
-https_roots.o: https_roots.c third_party/bearssl/inc/bearssl.h
+https_roots.o: https_roots.c third_party/bearssl/inc/bearssl.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -Ithird_party/bearssl/port -Ithird_party/bearssl/inc -c $< -o $@
 
-freestanding.o: freestanding.c
+freestanding.o: freestanding.c $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -fno-builtin -c $< -o $@
 
-build/bearssl/%.o: third_party/bearssl/src/%.c
+build/bearssl/%.o: third_party/bearssl/src/%.c $(ARCH_STAMP)
 	mkdir -p $(dir $@)
 	$(CC) $(BEARSSL_CFLAGS) -c $< -o $@
 
@@ -126,10 +137,11 @@ install-python-stdlib: ext4-2g.img $(PYTHON_STDLIB_ZIP)
 	python3 tools/install_python_stdlib.py ext4-2g.img $(PYTHON_STDLIB_ZIP) --demo examples/django_demo.py
 
 run: $(KERNEL_IMAGE) ext4-2g.img install-python-stdlib
-	qemu-system-i386 -cpu max -k pt-br -kernel $(KERNEL_IMAGE) -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070
+	qemu-system-x86_64 -cpu max -k pt-br -kernel $(KERNEL_IMAGE) -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070
 
 clean:
-	rm -f boot.o scheduler.o kernel.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf kernel-cpython.elf
+	rm -f boot.o scheduler.o kernel.o pacman.o linux_compat.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf kernel-cpython.elf
 	rm -rf build/bearssl
+	rm -f $(ARCH_STAMP)
 	rm -rf $(CPYTHON_BUILD)
 	$(MAKE) -C $(MICROPYTHON_PORT) clean
