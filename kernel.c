@@ -328,7 +328,7 @@ static size_t autocomplete_command(char *input, size_t length)
         "about", "cat", "cd", "clear", "delete", "dhcp", "dns", "echo",
         "git", "halt", "help", "https", "https-post", "https-save",
         "ifconfig", "ls", "mkdir", "mv", "parallel", "ping", "pwd",
-        "python", "python-stop", "reboot", "rm", "rmdir", "sqlite3",
+        "django-admin", "python", "python-stop", "reboot", "rm", "rmdir", "sqlite3",
         "tasks", "tcp", "write", "curl"
     };
     size_t token_length = 0;
@@ -825,6 +825,8 @@ static void show_help(void)
         "  python     inicia o REPL CPython",
         "  python ARQUIVO.py executa um script do ext4",
         "  python ARQUIVO.py & inicia o script em segundo plano",
+        "  django-admin startproject NOME cria um projeto Django",
+        "  django-admin startapp NOME cria uma aplicacao Django",
         "  python-stop encerra um servidor Python em segundo plano",
         "  parallel   executa duas tarefas concorrentes",
         "  tasks      mostra tarefas do kernel em execucao",
@@ -891,6 +893,27 @@ static void execute_command(char *command)
         if (background_python_state == 1) print("CPython esta ocupado pelo script em segundo plano.\n");
         else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
         else if (maios_cpython_repl() < 0) print("O REPL do CPython foi interrompido por erro.\n");
+    } else if (streq(command, "django-admin") || starts_with(command, "django-admin ")) {
+        char *cursor = command + 12;
+        char *arguments[16];
+        int count = 1;
+        int too_many = 0;
+        arguments[0] = "django-admin";
+        while (*cursor) {
+            char *argument = next_argument(&cursor);
+            if (argument == 0) break;
+            if (count == (int)(sizeof(arguments) / sizeof(arguments[0]))) {
+                too_many = 1;
+                break;
+            }
+            arguments[count++] = argument;
+        }
+        if (background_python_state == 1) print("CPython esta ocupado pelo script em segundo plano.\n");
+        else if (!disk_ready) print("Disco indisponivel.\n");
+        else if (count == 1 || too_many) print("Uso: django-admin startproject|startapp NOME [OPCOES]\n");
+        else if (maios_cpython_initialize() < 0) print("Nao foi possivel iniciar o CPython.\n");
+        else if (maios_cpython_django_admin(count, arguments) != 0)
+            print("django-admin terminou com erro.\n");
     } else if (streq(command, "sqlite3") || starts_with(command, "sqlite3 ")) {
         const char *filename = streq(command, "sqlite3") ? "maios.db" : command + 8;
         if (!disk_ready) print("Disco indisponivel.\n");

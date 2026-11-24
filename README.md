@@ -138,11 +138,27 @@ Respostas usam HTTP 200; requisições malformadas e erros do callback recebem
 O alvo `make install-python-stdlib` instala `/python311.zip` na imagem ext4 com
 CPython e os pacotes puros Django 5.2.19, asgiref 3.13.0 e sqlparse 0.6.1.
 `make run` também atualiza esse arquivo e instala o exemplo como `/django`.
-No terminal do maiOs, inicie a aplicação com `python django`; depois acesse
-`http://127.0.0.1:8070/` no host. A aplicação demonstra Django via WSGI e
-responde na rota `/`. O exemplo usa `USE_TZ=False`, pois a imagem ainda não
-inclui uma base de dados de fusos horários. Os wheels usados na compilação estão
-em `third_party/django_wheels/`.
+Como o servidor HTTP permanece ativo, inicie-o em segundo plano no terminal do
+maiOs com `python django &`; assim o prompt continua disponível. Acesse
+`http://127.0.0.1:8070/` no host e use `python-stop` para encerrar o servidor.
+A aplicação demonstra Django via WSGI e responde na rota `/`. O exemplo usa
+`USE_TZ=False`, pois a imagem ainda não inclui uma base de dados de fusos
+horários. Os wheels usados na compilação estão em `third_party/django_wheels/`.
+
+O shell inclui `django-admin startproject NOME` e `django-admin startapp NOME`.
+Por exemplo, `django-admin startproject site` cria `site/` no diretório atual;
+depois, `cd site` e `django-admin startapp core` cria a aplicação `core/`.
+Para iniciar o projeto, ainda dentro de `site/`, use `django-admin runserver`;
+ele serve a aplicação WSGI na porta 8070, encaminhada para
+`http://127.0.0.1:8070/`. Pressione Ctrl+C no maiOs para parar o servidor.
+O comando usa os templates oficiais empacotados com o wheel Django e grava os
+arquivos no ext4. O `runserver` do maiOs usa o servidor WSGI do kernel porque o
+port não oferece sockets POSIX gerais.
+O CPython do maiOs compila o módulo `array`, usado por `sqlite3` durante a
+inicialização de `django.contrib.auth` e `django.contrib.admin`. Para usar o
+admin, mantenha os apps e middlewares padrão do projeto, rode
+`django-admin migrate` e crie um usuário administrador com
+`django-admin createsuperuser` antes de acessar `/admin/`.
 
 O driver suporta até 256 grupos ext4 com blocos de 1024 bytes. Ele não suporta
 journal, extents, checksums ou partições. A navegação por diretórios é limitada

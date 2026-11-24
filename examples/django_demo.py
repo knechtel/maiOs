@@ -1,6 +1,6 @@
 """Small Django WSGI application for the maiOs CPython port.
 
-Run from the maiOs shell with: python django_demo.py
+Run from the maiOs shell with: python django &
 """
 
 import sys
