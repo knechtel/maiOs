@@ -41,12 +41,24 @@ static int wait_ata(int data) {
     for(uint32_t i=0;i<1000000;i++){ uint8_t s=inb(0x1f7); if(s&1)return 0; if(!(s&0x80)&&(!data||(s&8)))return 1; }
     return 0;
 }
-static int sector_io(uint32_t lba,uint8_t *buf,int write) {
-    if(lba>=0x10000000||!wait_ata(0))return 0;
+static int wait_ata_command_ready(void) {
+    for(uint32_t i=0;i<1000000;i++){
+        uint8_t s=inb(0x1f7);
+        if(!(s&0x80)&&!(s&8))return 1;
+    }
+    return 0;
+}
+static int sector_io_once(uint32_t lba,uint8_t *buf,int write) {
+    if(lba>=0x10000000||!wait_ata_command_ready())return 0;
     outb(0x1f6,0xe0|((lba>>24)&15)); outb(0x1f2,1); outb(0x1f3,lba); outb(0x1f4,lba>>8); outb(0x1f5,lba>>16); outb(0x1f7,write?0x30:0x20);
     if(!wait_ata(1))return 0;
     for(size_t i=0;i<256;i++) if(write) outw(0x1f0,buf[i*2]|(uint16_t)buf[i*2+1]<<8); else {uint16_t w=inw(0x1f0);buf[i*2]=w;buf[i*2+1]=w>>8;}
     if(write){outb(0x1f7,0xe7);return wait_ata(0);} return 1;
+}
+static int sector_io(uint32_t lba,uint8_t *buf,int write) {
+    for(uint8_t attempt=0;attempt<3;attempt++)
+        if(sector_io_once(lba,buf,write))return 1;
+    return 0;
 }
 static int block_read(uint32_t b,uint8_t *p){return b<blocks_count&&sector_io(b*2,p,0)&&sector_io(b*2+1,p+512,0);}
 static int block_write(uint32_t b,const uint8_t *p){return b<blocks_count&&sector_io(b*2,(uint8_t*)p,1)&&sector_io(b*2+1,(uint8_t*)p+512,1);}
@@ -82,7 +94,13 @@ static int inode_write(uint32_t ino,const uint8_t *in){
     uint32_t group=(ino-1)/inodes_per_group, index=(ino-1)%inodes_per_group;
     uint32_t table=rd32(group_desc(group)+8);
     uint32_t off=index*inode_size, b=table+off/BLOCK_SIZE, pos=off%BLOCK_SIZE;
-    uint8_t tmp[BLOCK_SIZE]; if(!block_read(b,tmp))return 0; copy(tmp+pos,in,128); return block_write(b,tmp);
+    uint8_t tmp[BLOCK_SIZE];
+    for(uint8_t attempt=0;attempt<3;attempt++){
+        if(!block_read(b,tmp))continue;
+        copy(tmp+pos,in,128);
+        if(block_write(b,tmp))return 1;
+    }
+    return 0;
 }
 static int allocate_inode(uint32_t *ino,int dir){
     uint8_t map[BLOCK_SIZE];
@@ -389,7 +407,9 @@ static int remove_entry(const char *name,int want_directory){
        active_inode||!entry_find(name,&ino,&type)||!inode_read(ino,raw))return 0;
     uint16_t mode=rd16(raw);
     int is_directory=(mode&0xF000)==0x4000;
-    if(is_directory!=want_directory||((mode&0xF000)!=0x4000&&(mode&0xF000)!=0x8000))return 0;
+    uint16_t file_type=mode&0xF000;
+    if(is_directory!=want_directory||
+       (!is_directory&&file_type!=0x8000&&file_type!=0xA000))return 0;
     if(read_inode==ino)return 0;
     if(is_directory&&!directory_is_empty(ino,raw))return 0;
     if(!dir_remove(parent_ino,name,ino))return 0;
@@ -398,13 +418,16 @@ static int remove_entry(const char *name,int want_directory){
         return inode_write(ino,raw);
     }
 
-    for(uint8_t i=0;i<12;i++){
-        uint32_t block=rd32(raw+40+i*4);
-        if(block&&!free_block(block))return 0;
+    int fast_symlink=file_type==0xA000&&rd32(raw+28)==0&&rd32(raw+4)<=60;
+    if(!fast_symlink){
+        for(uint8_t i=0;i<12;i++){
+            uint32_t block=rd32(raw+40+i*4);
+            if(block&&!free_block(block))return 0;
+        }
+        if(!free_block_tree(rd32(raw+88),1)||
+           !free_block_tree(rd32(raw+92),2)||
+           !free_block_tree(rd32(raw+96),3))return 0;
     }
-    if(!free_block_tree(rd32(raw+88),1)||
-       !free_block_tree(rd32(raw+92),2)||
-       !free_block_tree(rd32(raw+96),3))return 0;
     if(is_directory){
         uint8_t parent[128];
         if(!inode_read(parent_ino,parent))return 0;
@@ -442,14 +465,19 @@ static int ext4_delete_impl(const char *name){
 }
 
 static int ext4_rename_impl(const char *old_name,const char *new_name){
-    uint32_t ino,destination;uint8_t type,raw[128];
+    uint32_t ino,destination;uint8_t source_type,destination_type,raw[128];
     if(!mounted||!old_name||!new_name||!old_name[0]||!new_name[0]||
        same(old_name,".")||same(old_name,"..")||same(new_name,".")||same(new_name,"..")||
-       active_inode||!entry_find(old_name,&ino,&type)||
-       (entry_find(new_name,&destination,&type)&&destination!=ino)||
-       !inode_read(ino,raw)||(rd16(raw)&0xF000)!=0x8000||read_inode==ino)return 0;
+       active_inode||!entry_find(old_name,&ino,&source_type)||
+       !inode_read(ino,raw)||
+       (((rd16(raw)&0xF000)!=0x8000)&&((rd16(raw)&0xF000)!=0xA000))||
+       read_inode==ino)return 0;
     if(same(old_name,new_name))return 1;
-    if(!dir_add(cwd_inode,new_name,ino,1))return 0;
+    if(entry_find(new_name,&destination,&destination_type)){
+        if(destination==ino)return 1;
+        if(destination_type==2||!remove_entry(new_name,0))return 0;
+    }
+    if(!dir_add(cwd_inode,new_name,ino,source_type))return 0;
     if(dir_remove(cwd_inode,old_name,ino))return 1;
     dir_remove(cwd_inode,new_name,ino);
     return 0;
@@ -490,6 +518,164 @@ static int ext4_pwd_impl(char *buffer,size_t capacity){
         if(i+1<cwd_depth){if(pos+1>=capacity)return 0;buffer[pos++]='/';}
     }
     buffer[pos]=0;return 1;
+}
+static int symlink_target(uint32_t ino,uint8_t *raw,char *target,size_t capacity){
+    if(!inode_read(ino,raw)||(rd16(raw)&0xF000)!=0xA000)return 0;
+    uint32_t size=rd32(raw+4);if(!size||size>=capacity)return 0;
+    if(!rd32(raw+28))copy((uint8_t*)target,raw+40,size);
+    else {
+        uint8_t block[BLOCK_SIZE];uint32_t offset=0;
+        while(offset<size){uint32_t physical;if(!inode_map_block(ino,raw,offset/BLOCK_SIZE,0,&physical)||!block_read(physical,block))return 0;
+            uint32_t count=size-offset;if(count>BLOCK_SIZE)count=BLOCK_SIZE;
+            copy((uint8_t*)target+offset,block,count);offset+=count;}
+    }
+    target[size]=0;return 1;
+}
+static int path_append(char *path,size_t capacity,const char *component){
+    size_t length=0,component_length=0;while(path[length])length++;while(component[component_length])component_length++;
+    size_t separator=length>1; if(length+separator+component_length>=capacity)return 0;
+    if(separator)path[length++]='/';
+    copy((uint8_t*)path+length,(const uint8_t*)component,component_length+1);
+    return 1;
+}
+static int ext4_resolve_path_impl(const char *path,char *resolved,size_t capacity,int allow_missing_leaf){
+    if(!mounted||!path||!*path||!capacity)return 0;
+    char old_directory[256],pending[512];if(!ext4_pwd_impl(old_directory,sizeof(old_directory)))return 0;
+    size_t input_length=0;while(path[input_length]&&input_length<sizeof(pending)-1)input_length++;
+    if(path[input_length])return 0;
+    copy((uint8_t*)pending,(const uint8_t*)path,input_length+1);
+    size_t base_length=0;
+    if(path[0]=='/')base_length=1;
+    else {while(old_directory[base_length])base_length++;}
+    if(base_length>=sizeof(pending))return 0;
+    char base[512];if(path[0]=='/'){base[0]='/';base[1]=0;}else copy((uint8_t*)base,(const uint8_t*)old_directory,base_length+1);
+    unsigned int links=0;int ok=0;
+    while(1){
+        while(*pending=='/')for(size_t i=0;pending[i];i++)pending[i]=pending[i+1];
+        if(!*pending){ok=1;break;}
+        char component[64],remainder[512];size_t n=0;
+        while(pending[n]&&pending[n]!='/'){if(n>=63)goto done;component[n]=pending[n];n++;}
+        component[n]=0;size_t rest=0;while(pending[n]=='/')n++;
+        while(pending[n+rest]){if(rest>=sizeof(remainder)-1)goto done;remainder[rest]=pending[n+rest];rest++;}
+        remainder[rest]=0;
+        for(size_t i=0;i<sizeof(pending);i++)pending[i]=0;
+        if(same(component,".")){copy((uint8_t*)pending,(const uint8_t*)remainder,rest+1);continue;}
+        if(same(component,"..")){
+            size_t length=0;while(base[length])length++;
+            if(length>1){while(length>1&&base[length-1]!='/')length--;if(length>1)length--;base[length]=0;}
+            copy((uint8_t*)pending,(const uint8_t*)remainder,rest+1);continue;
+        }
+        if(!ext4_chdir_impl(base))goto done;
+        uint32_t ino;uint8_t type,raw[128];
+        if(!dir_find(cwd_inode,component,&ino,&type)){
+            if(allow_missing_leaf&&!rest&&path_append(base,sizeof(base),component)){ok=1;break;}
+            goto done;
+        }
+        if(!inode_read(ino,raw))goto done;
+        uint16_t mode=rd16(raw)&0xF000;
+        if(mode==0xA000||type==7){
+            char target[512],combined[512];if(++links>16||!symlink_target(ino,raw,target,sizeof(target)))goto done;
+            size_t t=0,r=0;while(target[t])t++;while(remainder[r])r++;
+            if(t+r+(r?1:0)>=sizeof(combined))goto done;
+            copy((uint8_t*)combined,(const uint8_t*)target,t);
+            if(r){combined[t++]='/';copy((uint8_t*)combined+t,(const uint8_t*)remainder,r+1);}else combined[t]=0;
+            if(target[0]=='/'){base[0]='/';base[1]=0;}
+            copy((uint8_t*)pending,(const uint8_t*)combined,t+r+(r?2:1));
+            continue;
+        }
+        if(rest&&mode!=0x4000&&type!=2)goto done;
+        if(!path_append(base,sizeof(base),component))goto done;
+        copy((uint8_t*)pending,(const uint8_t*)remainder,rest+1);
+    }
+done:
+    if(ok){size_t length=0;while(base[length])length++;if(length>=capacity)ok=0;else copy((uint8_t*)resolved,(const uint8_t*)base,length+1);}
+    ext4_chdir_impl(old_directory);
+    return ok;
+}
+static int canonical_parent_leaf(const char *path,int allow_missing,
+                                 char *parent,size_t parent_capacity,
+                                 char *leaf,size_t leaf_capacity){
+    char canonical[512];
+    if(!ext4_resolve_path_impl(path,canonical,sizeof(canonical),allow_missing))return 0;
+    size_t length=0,slash=(size_t)-1;while(canonical[length]){if(canonical[length]=='/')slash=length;length++;}
+    size_t start=slash==(size_t)-1?0:slash+1,leaf_length=length-start;
+    if(!leaf_length||leaf_length>=leaf_capacity)return 0;
+    for(size_t i=0;i<=leaf_length;i++)leaf[i]=canonical[start+i];
+    if(slash==(size_t)-1){if(parent_capacity<2)return 0;parent[0]='/';parent[1]=0;}
+    else {size_t n=slash?slash:1;if(n>=parent_capacity)return 0;for(size_t i=0;i<n;i++)parent[i]=canonical[i];parent[n]=0;}
+    return 1;
+}
+static int ext4_link_impl(const char *existing_path,const char *new_path){
+    char original[256],source_parent[512],destination_parent[512],source_leaf[64],destination_leaf[64];
+    uint32_t ino;uint8_t type,raw[128];
+    if(!ext4_pwd_impl(original,sizeof(original))||
+       !canonical_parent_leaf(existing_path,0,source_parent,sizeof(source_parent),source_leaf,sizeof(source_leaf))||
+       !canonical_parent_leaf(new_path,1,destination_parent,sizeof(destination_parent),destination_leaf,sizeof(destination_leaf)))return 0;
+    if(!ext4_chdir_impl(source_parent)||!entry_find(source_leaf,&ino,&type)||!inode_read(ino,raw))goto failed;
+    uint16_t mode=rd16(raw)&0xF000;
+    if((mode!=0x8000&&mode!=0xA000)||rd16(raw+26)==0xFFFF)goto failed;
+    if(!ext4_chdir_impl(destination_parent))goto failed;
+    {uint32_t existing;uint8_t existing_type;if(entry_find(destination_leaf,&existing,&existing_type))goto failed;}
+    if(!dir_add(cwd_inode,destination_leaf,ino,type))goto failed;
+    wr16(raw+26,rd16(raw+26)+1);
+    if(!inode_write(ino,raw)){dir_remove(cwd_inode,destination_leaf,ino);goto failed;}
+    ext4_chdir_impl(original);return 1;
+failed:
+    ext4_chdir_impl(original);return 0;
+}
+int ext4_resolve_path(const char *path,char *resolved,size_t capacity,int allow_missing_leaf){
+    scheduler_critical_enter();int ok=ext4_resolve_path_impl(path,resolved,capacity,allow_missing_leaf);scheduler_critical_leave();return ok;
+}
+static int ext4_inode_number_impl(const char *path,uint32_t *result){
+    char original[256],parent[512],leaf[64];uint32_t ino;uint8_t type;
+    if(!result||!ext4_pwd_impl(original,sizeof(original)))return 0;
+    char canonical[512];
+    if(!ext4_resolve_path_impl(path,canonical,sizeof(canonical),0))return 0;
+    if(same(canonical,"/")){*result=ROOT_INODE;return 1;}
+    if(!canonical_parent_leaf(canonical,0,parent,sizeof(parent),leaf,sizeof(leaf))||
+       !ext4_chdir_impl(parent)||!entry_find(leaf,&ino,&type)){
+        ext4_chdir_impl(original);return 0;
+    }
+    ext4_chdir_impl(original);*result=ino;return 1;
+}
+int ext4_inode_number(const char *path,uint32_t *inode){
+    scheduler_critical_enter();int ok=ext4_inode_number_impl(path,inode);scheduler_critical_leave();return ok;
+}
+static int ext4_readlink_impl(const char *path,char *target,size_t capacity){
+    if(!path||!*path||!target||!capacity)return 0;
+    char old_directory[256],input[512],parent_input[512],parent[512],leaf[64];
+    if(!ext4_pwd_impl(old_directory,sizeof(old_directory)))return 0;
+    size_t length=0;while(path[length]&&length<sizeof(input)-1)length++;if(path[length])return 0;
+    copy((uint8_t*)input,(const uint8_t*)path,length+1);
+    char *slash=0;for(size_t i=0;i<length;i++)if(input[i]=='/')slash=&input[i];
+    char *name=slash?slash+1:input;size_t name_length=0;while(name[name_length])name_length++;
+    if(!name_length||name_length>63)return 0;
+    copy((uint8_t*)leaf,(const uint8_t*)name,name_length+1);
+    if(slash){size_t parent_length=slash==input?1:(size_t)(slash-input);if(slash==input){parent_input[0]='/';parent_input[1]=0;}else{copy((uint8_t*)parent_input,(const uint8_t*)input,parent_length);parent_input[parent_length]=0;}}
+    else {size_t old_length=0;while(old_directory[old_length])old_length++;copy((uint8_t*)parent_input,(const uint8_t*)old_directory,old_length+1);}
+    if(!ext4_resolve_path_impl(parent_input,parent,sizeof(parent),0)||!ext4_chdir_impl(parent))goto failed;
+    uint32_t ino;uint8_t type,raw[128];
+    if(!dir_find(cwd_inode,leaf,&ino,&type)||!symlink_target(ino,raw,target,capacity))goto failed;
+    ext4_chdir_impl(old_directory);
+    size_t target_length=0;while(target[target_length])target_length++;return (int)target_length;
+failed:
+    ext4_chdir_impl(old_directory);
+    return 0;
+}
+int ext4_readlink(const char *path,char *target,size_t capacity){
+    scheduler_critical_enter();int length=ext4_readlink_impl(path,target,capacity);scheduler_critical_leave();return length;
+}
+static int ext4_entry_type_impl(const char *name){
+    uint32_t ino;uint8_t type,raw[128];
+    if(!mounted||!name||!name[0]||!entry_find(name,&ino,&type)||!inode_read(ino,raw))return 0;
+    uint16_t mode=rd16(raw)&0xF000;
+    if(mode==0x4000)return 2;
+    if(mode==0xA000)return 3;
+    if(mode==0x8000)return 1;
+    return 0;
+}
+int ext4_entry_type(const char *name){
+    scheduler_critical_enter();int type=ext4_entry_type_impl(name);scheduler_critical_leave();return type;
 }
 static int ext4_read_start_impl(const char *name,uint32_t *size){
     uint32_t ino;uint8_t type;
@@ -546,6 +732,26 @@ static int ext4_mkdir_impl(const char *name){
     if(!block_write(blk,dir)||!inode_write(ino,raw)||!dir_add(cwd_inode,name,ino,2))return 0;
     uint8_t parent[128];if(inode_read(cwd_inode,parent)){wr16(parent+26,rd16(parent+26)+1);inode_write(cwd_inode,parent);}return 1;
 }
+static int ext4_symlink_impl(const char *target,const char *name){
+    if(!mounted||!target||!target[0]||!name||!name[0]||active_inode)return 0;
+    size_t length=0;while(target[length]&&length<1024)length++;
+    if(target[length]||length>1023)return 0;
+    uint32_t exists,ino;uint8_t type,raw[128],data[BLOCK_SIZE];
+    if(entry_find(name,&exists,&type)||!allocate_inode(&ino,0))return 0;
+    zero(raw,sizeof(raw));wr16(raw,0xA1FF);wr16(raw+26,1);wr32(raw+4,(uint32_t)length);
+    if(length<=60)copy(raw+40,(const uint8_t*)target,length);
+    else {
+        for(uint32_t offset=0,logical=0;offset<length;logical++){
+            uint32_t block;size_t count=length-offset;if(count>BLOCK_SIZE)count=BLOCK_SIZE;
+            if(!inode_map_block(ino,raw,logical,1,&block))return 0;
+            zero(data,sizeof(data));copy(data,(const uint8_t*)target+offset,count);
+            if(!block_write(block,data))return 0;
+            offset+=(uint32_t)count;
+        }
+    }
+    if(!inode_write(ino,raw)||!dir_add(cwd_inode,name,ino,7))return 0;
+    return 1;
+}
 
 int ext4_mount(void){scheduler_critical_enter();int ok=ext4_mount_impl();scheduler_critical_leave();return ok;}
 int ext4_unlink(const char *name){scheduler_critical_enter();int ok=ext4_unlink_impl(name);scheduler_critical_leave();return ok;}
@@ -553,12 +759,25 @@ int ext4_rmdir(const char *name){scheduler_critical_enter();int ok=ext4_rmdir_im
 int ext4_delete(const char *name){scheduler_critical_enter();int ok=ext4_delete_impl(name);scheduler_critical_leave();return ok;}
 int ext4_rename(const char *old_name,const char *new_name){scheduler_critical_enter();int ok=ext4_rename_impl(old_name,new_name);scheduler_critical_leave();return ok;}
 int ext4_list(ext4_entry_t *entries,size_t capacity){scheduler_critical_enter();int count=ext4_list_impl(entries,capacity);scheduler_critical_leave();return count;}
-int ext4_chdir(const char *path){scheduler_critical_enter();int ok=ext4_chdir_impl(path);scheduler_critical_leave();return ok;}
+int ext4_chdir(const char *path){scheduler_critical_enter();char resolved[512];int ok=ext4_resolve_path_impl(path,resolved,sizeof(resolved),0)&&ext4_chdir_impl(resolved);scheduler_critical_leave();return ok;}
 int ext4_pwd(char *buffer,size_t capacity){scheduler_critical_enter();int ok=ext4_pwd_impl(buffer,capacity);scheduler_critical_leave();return ok;}
 
 int ext4_read_start(const char *name,uint32_t *size){
     scheduler_critical_enter();
-    if(!ext4_read_start_impl(name,size)){scheduler_critical_leave();return 0;}
+    char canonical[512],old_directory[256],basename[64];
+    if(!ext4_pwd_impl(old_directory,sizeof(old_directory))||
+       !ext4_resolve_path_impl(name,canonical,sizeof(canonical),0)){
+        scheduler_critical_leave();return 0;
+    }
+    char *slash=0;for(size_t i=0;canonical[i];i++)if(canonical[i]=='/')slash=&canonical[i];
+    char *leaf=slash?slash+1:canonical;
+    size_t length=0;while(leaf[length])length++;
+    if(!length||length>63){scheduler_critical_leave();return 0;}
+    for(size_t i=0;i<=length;i++)basename[i]=leaf[i];
+    if(slash){if(slash==canonical)slash[1]=0;else *slash=0;if(!ext4_chdir_impl(canonical)){ext4_chdir_impl(old_directory);scheduler_critical_leave();return 0;}}
+    int ok=ext4_read_start_impl(basename,size);
+    ext4_chdir_impl(old_directory);
+    if(!ok){scheduler_critical_leave();return 0;}
     return 1;
 }
 int ext4_read_block(uint32_t index,uint8_t *data){return ext4_read_block_impl(index,data);}
@@ -578,3 +797,5 @@ int ext4_write(const char *name,const uint8_t *data,size_t size){
     scheduler_critical_enter();int ok=ext4_write_impl(name,data,size);scheduler_critical_leave();return ok;
 }
 int ext4_mkdir(const char *name){scheduler_critical_enter();int ok=ext4_mkdir_impl(name);scheduler_critical_leave();return ok;}
+int ext4_symlink(const char *target,const char *name){scheduler_critical_enter();int ok=ext4_symlink_impl(target,name);scheduler_critical_leave();return ok;}
+int ext4_link(const char *existing_path,const char *new_path){scheduler_critical_enter();int ok=ext4_link_impl(existing_path,new_path);scheduler_critical_leave();return ok;}

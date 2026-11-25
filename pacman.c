@@ -2,11 +2,15 @@
 #include <stdint.h>
 #include "ext4.h"
 #include "pacman.h"
+#include "archpkg.h"
 
 #define PACMAN_DB_FILE "local.db"
 #define PACMAN_DB_LIMIT (64u * 1024u)
 static char package_db[PACMAN_DB_LIMIT + 1];
 static uint8_t package_file[PACMAN_DB_LIMIT];
+static int database_error;
+
+int pacman_last_database_error(void) { return database_error; }
 
 static int valid_component(const char *text)
 {
@@ -15,7 +19,7 @@ static int valid_component(const char *text)
     for (; *text; ++text) {
         char c = *text;
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) return 0;
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '+')) return 0;
     }
     return 1;
 }
@@ -41,14 +45,14 @@ static int read_current_file(const char *name, uint8_t *buffer, uint32_t capacit
 static int package_is_installed(const char *name)
 {
     uint32_t size = 0;
-    if (!ext4_read_start(PACMAN_DB_FILE, &size)) return 0;
-    if (size > PACMAN_DB_LIMIT) { ext4_read_end(); return -1; }
+    if (!ext4_read_start(PACMAN_DB_FILE, &size)) { database_error = 1; return -1; }
+    if (size > PACMAN_DB_LIMIT) { database_error = 2; ext4_read_end(); return -1; }
     for (uint32_t offset = 0; offset < size;) {
         uint8_t block[1024];
         uint32_t index = offset / 1024u;
         uint32_t count = size - offset;
         if (count > 1024u) count = 1024u;
-        if (!ext4_read_block(index, block)) { ext4_read_end(); return -1; }
+        if (!ext4_read_block(index, block)) { database_error = 3; ext4_read_end(); return -1; }
         for (uint32_t i = 0; i < count; ++i) package_db[offset + i] = (char)block[i];
         offset += count;
     }
@@ -198,6 +202,59 @@ int pacman_install_local(const char *archive_name)
     return 1;
 }
 
+int pacman_register_arch(const char *name, const char *version)
+{
+    if (!valid_component(name) || !version || !*version) return -1;
+    uint32_t name_length = 0, version_length = 0;
+    while (name[name_length]) ++name_length;
+    while (version[version_length]) {
+        char c = version[version_length];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '+' || c == ':')) return -1;
+        if (++version_length >= 96) return -1;
+    }
+    char original[1100];
+    if (!ext4_pwd(original, sizeof(original)) || !open_db(original, sizeof(original))) return -1;
+    int installed = package_is_installed(name);
+    if (installed != 0) { close_db(original); return installed < 0 ? -1 : 0; }
+    uint32_t size = 0;
+    int read_result = read_current_file(PACMAN_DB_FILE, (uint8_t *)package_db,
+                                        PACMAN_DB_LIMIT, &size);
+    if (read_result < 0 || size + name_length + version_length + 8 > PACMAN_DB_LIMIT) {
+        close_db(original);
+        return -1;
+    }
+    if (!read_result) size = 0;
+    uint32_t at = size;
+    if (at && package_db[at - 1] != '\n') package_db[at++] = '\n';
+    for (uint32_t i = 0; i < name_length; ++i) package_db[at++] = name[i];
+    package_db[at++] = ' ';
+    for (uint32_t i = 0; i < version_length; ++i) package_db[at++] = version[i];
+    package_db[at++] = ' ';
+    package_db[at++] = '@'; package_db[at++] = 'a'; package_db[at++] = 'r';
+    package_db[at++] = 'c'; package_db[at++] = 'h'; package_db[at++] = '\n';
+    int ok = ext4_write(PACMAN_DB_FILE, (const uint8_t *)package_db, at);
+    close_db(original);
+    return ok ? 1 : -1;
+}
+
+int pacman_package_installed(const char *name)
+{
+    char original[1100];
+    database_error = 0;
+    if (!valid_component(name)) { database_error = 4; return -1; }
+    for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+        if (!ext4_pwd(original, sizeof(original)) || !open_db(original, sizeof(original))) {
+            database_error = 5;
+            continue;
+        }
+        int result = package_is_installed(name);
+        close_db(original);
+        if (result >= 0) return result;
+    }
+    return -1;
+}
+
 int pacman_remove(const char *package_name)
 {
     if (!valid_component(package_name)) return -1;
@@ -209,7 +266,7 @@ int pacman_remove(const char *package_name)
     if (read_result != 1) { close_db(original); return read_result < 0 ? -1 : 0; }
 
     uint32_t position = 0, output = 0;
-    int found = 0;
+    int found = 0, arch_package = 0;
     char filename[64] = {0};
     while (position < size) {
         uint32_t start = position;
@@ -233,15 +290,24 @@ int pacman_remove(const char *package_name)
             }
             for (uint32_t i = 0; i < file_length; ++i) filename[i] = package_db[second_space + 1 + i];
             filename[file_length] = 0;
+            if (name_equal(filename, "@arch")) {
+                if (!archpkg_remove_files(package_name)) {
+                    close_db(original);
+                    return -1;
+                }
+                arch_package = 1;
+            }
             found = 1;
         } else {
             for (uint32_t i = start; i < position; ++i) package_file[output++] = (uint8_t)package_db[i];
         }
     }
     if (!found) { close_db(original); return 0; }
-    if (!ext4_chdir("/apps") || !ext4_unlink(filename) ||
-        !ext4_chdir("/var/lib/pacman") ||
-        !ext4_write(PACMAN_DB_FILE, package_file, output)) {
+    int removed = arch_package ?
+        ext4_chdir("/var/lib/pacman") && ext4_write(PACMAN_DB_FILE, package_file, output) :
+        ext4_chdir("/apps") && ext4_unlink(filename) &&
+        ext4_chdir("/var/lib/pacman") && ext4_write(PACMAN_DB_FILE, package_file, output);
+    if (!removed) {
         close_db(original);
         return -1;
     }

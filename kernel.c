@@ -5,6 +5,11 @@
 #include "net.h"
 #include "gitpack.h"
 #include "pacman.h"
+#include "archpkg.h"
+#include "archrepo.h"
+#include "memory.h"
+#include "linux_elf.h"
+#include "linux_compat.h"
 #include "cpython_port.h"
 #include "scheduler.h"
 
@@ -18,6 +23,16 @@ int maios_sqlite_shell(const char *filename);
 static size_t cursor_x;
 static size_t cursor_y;
 static uint8_t color = VGA_COLOR;
+static int serial_console_ready;
+static uint8_t linux_console_echo = 1;
+static uint8_t ansi_state, ansi_private, ansi_param_count, ansi_param_index;
+static uint16_t ansi_params[4], saved_cursor_x, saved_cursor_y;
+static size_t ansi_scroll_top, ansi_scroll_bottom = VGA_HEIGHT - 1;
+static uint8_t ansi_cursor_visible = 1;
+static uint16_t linux_primary_screen[VGA_WIDTH * VGA_HEIGHT];
+static size_t linux_primary_cursor_x, linux_primary_cursor_y;
+static size_t linux_primary_scroll_top, linux_primary_scroll_bottom = VGA_HEIGHT - 1;
+static uint8_t linux_primary_cursor_visible = 1, linux_alt_screen_active;
 static int disk_ready;
 static int network_stack_ready;
 static volatile unsigned int parallel_finished;
@@ -34,14 +49,17 @@ static void put_char(char c);
 static char read_key(void);
 static void prompt(void);
 static inline uint8_t inb(uint16_t port);
+static void update_hardware_cursor(void);
+static char *next_argument(char **cursor);
 
 static volatile uint8_t keyboard_ctrl_down;
 static volatile uint8_t keyboard_interrupt;
+static volatile uint8_t linux_process_active;
 
 /* Network waits run in C, so they must poll the PS/2 controller too. */
 int maios_poll_keyboard_interrupt(void)
 {
-    if (background_python_state == 1) return 0;
+    if (background_python_state == 1 || linux_process_active) return 0;
     while (inb(0x64) & 1) {
         uint8_t scan = inb(0x60);
         if (scan == 0xE0) continue;
@@ -101,7 +119,8 @@ static int network_command_conflicts_with_server(const char *command)
            streq(command, "dhcp") || streq(command, "dns") || starts_with(command, "dns ") ||
            starts_with(command, "tcp ") || starts_with(command, "git ") ||
            starts_with(command, "curl ") || starts_with(command, "https ") ||
-           starts_with(command, "https-post ") || starts_with(command, "https-save ");
+           starts_with(command, "https-post ") || starts_with(command, "https-save ") ||
+           starts_with(command, "pacman -S ") || starts_with(command, "pacman -s ");
 }
 
 int maios_python_read_char(void);
@@ -134,7 +153,14 @@ static void print_https_failure(void)
 {
     int failure=net_https_last_error();
     if(failure==NET_HTTPS_ERROR_DNS)print("Falha DNS ao resolver o host.\n");
-    else if(failure==NET_HTTPS_ERROR_TCP)print("Falha na conexao TCP porta 443.\n");
+    else if(failure==NET_HTTPS_ERROR_TCP){
+        int error=net_tcp_last_connect_error();
+        print("Falha na conexao TCP porta 443");
+        if(error==NET_TCP_CONNECT_ERROR_FRAME)print(" (placa recusou o envio do SYN)");
+        else if(error==NET_TCP_CONNECT_ERROR_RESET)print(" (host remoto recusou a conexao)");
+        else if(error==NET_TCP_CONNECT_ERROR_TIMEOUT)print(" (timeout aguardando SYN-ACK; confira a rede do QEMU)");
+        put_char('.');put_char('\n');
+    }
     else if(failure==NET_HTTPS_ERROR_CLOCK)print("Relogio RTC invalido para validar certificados.\n");
     else if(failure==NET_HTTPS_ERROR_RANDOM)print("RDRAND indisponivel para iniciar TLS.\n");
     else if(failure==NET_HTTPS_ERROR_TLS){
@@ -238,16 +264,45 @@ static void clear_screen(void)
 
 static void scroll_screen(void)
 {
-    for (size_t y = 1; y < VGA_HEIGHT; ++y)
+    for (size_t y = ansi_scroll_top; y < ansi_scroll_bottom; ++y)
         for (size_t x = 0; x < VGA_WIDTH; ++x)
-            VGA_MEMORY[(y - 1) * VGA_WIDTH + x] = VGA_MEMORY[y * VGA_WIDTH + x];
+            VGA_MEMORY[y * VGA_WIDTH + x] = VGA_MEMORY[(y + 1) * VGA_WIDTH + x];
     for (size_t x = 0; x < VGA_WIDTH; ++x)
-        VGA_MEMORY[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
-    cursor_y = VGA_HEIGHT - 1;
+        VGA_MEMORY[ansi_scroll_bottom * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+    cursor_y = ansi_scroll_bottom;
+}
+
+static void scroll_region_down(size_t top, size_t bottom, size_t count)
+{
+    if (top > bottom || bottom >= VGA_HEIGHT) return;
+    if (count > bottom - top + 1) count = bottom - top + 1;
+    for (size_t y = bottom + 1; y-- > top + count;)
+        for (size_t x = 0; x < VGA_WIDTH; ++x)
+            VGA_MEMORY[y * VGA_WIDTH + x] = VGA_MEMORY[(y - count) * VGA_WIDTH + x];
+    for (size_t y = top; y < top + count; ++y)
+        for (size_t x = 0; x < VGA_WIDTH; ++x)
+            VGA_MEMORY[y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+}
+
+static void scroll_region_up(size_t top, size_t bottom, size_t count)
+{
+    if (top > bottom || bottom >= VGA_HEIGHT) return;
+    if (count > bottom - top + 1) count = bottom - top + 1;
+    for (size_t y = top; y + count <= bottom; ++y)
+        for (size_t x = 0; x < VGA_WIDTH; ++x)
+            VGA_MEMORY[y * VGA_WIDTH + x] = VGA_MEMORY[(y + count) * VGA_WIDTH + x];
+    for (size_t y = bottom + 1 - count; y <= bottom; ++y)
+        for (size_t x = 0; x < VGA_WIDTH; ++x)
+            VGA_MEMORY[y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
 }
 
 static void put_char(char c)
 {
+    if (serial_console_ready) {
+        unsigned int spins = 1000000;
+        while (!(inb(0x3FD) & 0x20) && --spins) { }
+        if (spins) outb(0x3F8, (uint8_t)c);
+    }
     if (c == '\n') {
         cursor_x = 0;
         ++cursor_y;
@@ -265,8 +320,141 @@ static void put_char(char c)
             ++cursor_y;
         }
     }
-    if (cursor_y >= VGA_HEIGHT)
+    if (cursor_y == ansi_scroll_bottom + 1 || cursor_y >= VGA_HEIGHT)
         scroll_screen();
+    update_hardware_cursor();
+}
+
+static void update_hardware_cursor(void)
+{
+    uint16_t position = (uint16_t)(cursor_y * VGA_WIDTH + cursor_x);
+    outb(0x3D4, 0x0A);
+    uint8_t start = inb(0x3D5);
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, ansi_cursor_visible ? (uint8_t)(start & ~0x20u) :
+                                           (uint8_t)(start | 0x20u));
+    outb(0x3D4, 0x0F); outb(0x3D5, (uint8_t)position);
+    outb(0x3D4, 0x0E); outb(0x3D5, (uint8_t)(position >> 8));
+}
+
+static void ansi_clear_line(size_t from, size_t to)
+{
+    if (to >= VGA_WIDTH) to = VGA_WIDTH - 1;
+    for (size_t x = from; x <= to; ++x)
+        VGA_MEMORY[cursor_y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+}
+
+static void ansi_finish_csi(char final)
+{
+    unsigned int first = ansi_params[0] ? ansi_params[0] : 1;
+    switch (final) {
+    case 'A': cursor_y = first > cursor_y ? 0 : cursor_y - first; break;
+    case 'B': cursor_y += first; if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1; break;
+    case 'C': cursor_x += first; if (cursor_x >= VGA_WIDTH) cursor_x = VGA_WIDTH - 1; break;
+    case 'D': cursor_x = first > cursor_x ? 0 : cursor_x - first; break;
+    case 'H': case 'f':
+        cursor_y = ansi_params[0] ? ansi_params[0] - 1 : 0;
+        cursor_x = ansi_params[1] ? ansi_params[1] - 1 : 0;
+        if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1;
+        if (cursor_x >= VGA_WIDTH) cursor_x = VGA_WIDTH - 1;
+        break;
+    case 'J':
+        if (ansi_params[0] == 2 || ansi_params[0] == 3) clear_screen();
+        else if (ansi_params[0] == 0) {
+            ansi_clear_line(cursor_x, VGA_WIDTH - 1);
+            for (size_t y = cursor_y + 1; y < VGA_HEIGHT; ++y)
+                for (size_t x = 0; x < VGA_WIDTH; ++x)
+                    VGA_MEMORY[y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+        } else if (ansi_params[0] == 1) {
+            for (size_t y = 0; y < cursor_y; ++y)
+                for (size_t x = 0; x < VGA_WIDTH; ++x)
+                    VGA_MEMORY[y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+            ansi_clear_line(0, cursor_x);
+        }
+        break;
+    case 'K':
+        if (ansi_params[0] == 0) ansi_clear_line(cursor_x, VGA_WIDTH - 1);
+        else if (ansi_params[0] == 1) ansi_clear_line(0, cursor_x);
+        else if (ansi_params[0] == 2) ansi_clear_line(0, VGA_WIDTH - 1);
+        break;
+    case 'r':
+        ansi_scroll_top = ansi_params[0] ? ansi_params[0] - 1 : 0;
+        ansi_scroll_bottom = ansi_params[1] ? ansi_params[1] - 1 : VGA_HEIGHT - 1;
+        if (ansi_scroll_top >= VGA_HEIGHT || ansi_scroll_bottom >= VGA_HEIGHT ||
+            ansi_scroll_top >= ansi_scroll_bottom) {
+            ansi_scroll_top = 0;
+            ansi_scroll_bottom = VGA_HEIGHT - 1;
+        }
+        cursor_x = 0; cursor_y = ansi_scroll_top;
+        break;
+    case 'S': scroll_region_up(ansi_scroll_top, ansi_scroll_bottom, first); break;
+    case 'T': scroll_region_down(ansi_scroll_top, ansi_scroll_bottom, first); break;
+    case 'L': scroll_region_down(cursor_y, ansi_scroll_bottom, first); break;
+    case 'M': scroll_region_up(cursor_y, ansi_scroll_bottom, first); break;
+    case 's': saved_cursor_x = (uint16_t)cursor_x; saved_cursor_y = (uint16_t)cursor_y; break;
+    case 'u': cursor_x = saved_cursor_x; cursor_y = saved_cursor_y; break;
+    case 'h': case 'l':
+        if (ansi_private && ansi_params[0] == 25) ansi_cursor_visible = final == 'h';
+        if (ansi_private && (ansi_params[0] == 47 || ansi_params[0] == 1047 ||
+                             ansi_params[0] == 1049)) {
+            if (final == 'h' && !linux_alt_screen_active) {
+                for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i)
+                    linux_primary_screen[i] = VGA_MEMORY[i];
+                linux_primary_cursor_x = cursor_x;
+                linux_primary_cursor_y = cursor_y;
+                linux_primary_cursor_visible = ansi_cursor_visible;
+                linux_primary_scroll_top = ansi_scroll_top;
+                linux_primary_scroll_bottom = ansi_scroll_bottom;
+                linux_alt_screen_active = 1;
+                ansi_scroll_top = 0;
+                ansi_scroll_bottom = VGA_HEIGHT - 1;
+                clear_screen();
+            } else if (final == 'l' && linux_alt_screen_active) {
+                for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i)
+                    VGA_MEMORY[i] = linux_primary_screen[i];
+                cursor_x = linux_primary_cursor_x;
+                cursor_y = linux_primary_cursor_y;
+                ansi_cursor_visible = linux_primary_cursor_visible;
+                ansi_scroll_top = linux_primary_scroll_top;
+                ansi_scroll_bottom = linux_primary_scroll_bottom;
+                linux_alt_screen_active = 0;
+            }
+        }
+        break;
+    default: break; /* SGR and alternate-screen requests do not affect VGA text. */
+    }
+    update_hardware_cursor();
+}
+
+static void linux_console_emit(char c)
+{
+    if (ansi_state == 1) {
+        ansi_state = c == '[' ? 2 : 0;
+        if (ansi_state == 2) {
+            ansi_private = 0; ansi_param_count = 1; ansi_param_index = 0;
+            for (size_t i = 0; i < 4; ++i) ansi_params[i] = 0;
+        }
+        return;
+    }
+    if (ansi_state == 2) {
+        if (c == '?' && ansi_param_index == 0 && ansi_params[0] == 0) {
+            ansi_private = 1; return;
+        }
+        if (c >= '0' && c <= '9') {
+            unsigned value = ansi_params[ansi_param_index] * 10u + (unsigned)(c - '0');
+            ansi_params[ansi_param_index] = value > 999 ? 999 : (uint16_t)value;
+            return;
+        }
+        if (c == ';') {
+            if (ansi_param_index < 3) ++ansi_param_index;
+            return;
+        }
+        ansi_finish_csi(c);
+        ansi_state = 0;
+        return;
+    }
+    if (c == 0x1b) ansi_state = 1;
+    else put_char(c);
 }
 
 int maios_python_read_char(void)
@@ -330,7 +518,7 @@ static size_t autocomplete_command(char *input, size_t length)
         "git", "halt", "help", "https", "https-post", "https-save",
         "ifconfig", "ls", "mkdir", "mv", "parallel", "ping", "pwd",
         "django-admin", "python", "python-stop", "reboot", "rm", "rmdir", "sqlite3",
-        "tasks", "tcp", "write", "curl"
+        "tasks", "tcp", "write", "curl", "run"
     };
     size_t token_length = 0;
     while (token_length < length && input[token_length] != ' ') ++token_length;
@@ -413,6 +601,72 @@ static void show_file(const char *name)
     }
     ext4_read_end();
     put_char('\n');
+}
+
+static void run_linux_file(char *command_arguments)
+{
+    enum { MAX_ELF_SIZE = 8u * 1024u * 1024u };
+    char *arguments[16];
+    size_t argument_count = 0;
+    char *cursor = command_arguments;
+    while (argument_count < sizeof(arguments) / sizeof(arguments[0])) {
+        char *argument = next_argument(&cursor);
+        if (!argument) break;
+        arguments[argument_count++] = argument;
+    }
+    if (!argument_count || next_argument(&cursor)) {
+        print("Uso: run EXECUTAVEL [ARGUMENTOS...]\n");
+        return;
+    }
+    const char *name = arguments[0];
+    uint32_t size = 0;
+    uint64_t checkpoint = memory_checkpoint();
+    if (!ext4_read_start(name, &size)) {
+        print("Executavel nao encontrado.\n");
+        return;
+    }
+    if (!size || size > MAX_ELF_SIZE) {
+        ext4_read_end();
+        print("ELF vazio ou maior que o limite de 8 MiB.\n");
+        return;
+    }
+    uint64_t pages = (size + 4095u) / 4096u;
+    uint64_t first_page = 0;
+    for (uint64_t i = 0; i < pages; ++i) {
+        uint64_t page = memory_alloc_page();
+        if (!page || (i && page != first_page + i * 4096u)) {
+            ext4_read_end();
+            memory_reset_user(checkpoint);
+            print("Memoria insuficiente para carregar o executavel.\n");
+            return;
+        }
+        if (!i) first_page = page;
+    }
+
+    uint8_t block[1024];
+    uint32_t offset = 0;
+    int read_ok = 1;
+    for (uint32_t i = 0; offset < size; ++i) {
+        if (!ext4_read_block(i, block)) { read_ok = 0; break; }
+        uint32_t count = size - offset;
+        if (count > sizeof(block)) count = sizeof(block);
+        uint8_t *destination = (uint8_t *)(uintptr_t)(first_page + offset);
+        for (uint32_t j = 0; j < count; ++j) destination[j] = block[j];
+        offset += count;
+    }
+    ext4_read_end();
+    if (!read_ok) {
+        memory_reset_user(checkpoint);
+        print("Erro ao ler executavel do ext4.\n");
+        return;
+    }
+
+    print("Iniciando ELF64 Linux...\n");
+    int status = linux_elf_run((const void *)(uintptr_t)first_page, size,
+                               (const char *const *)arguments, argument_count);
+    memory_reset_user(checkpoint);
+    if (status < 0) print("ELF invalido, interpretador ausente ou recurso incompativel.\n");
+    else { print("Processo encerrado com codigo "); print_u32((uint32_t)status); put_char('\n'); }
 }
 
 static void reboot(void)
@@ -819,7 +1073,8 @@ static void show_help(void)
         "  git clone URL [DIRETORIO] clona um repositorio",
         "  pacman -Q lista pacotes instalados",
         "  pacman -Qi NOME consulta um pacote instalado",
-        "  pacman -U ARQUIVO.mpk instala um pacote local maiOS",
+        "  pacman -S NOME instala pacote e dependencias do Arch",
+        "  pacman -U ARQUIVO... instala pacotes locais em sequencia",
         "  pacman -R NOME remove um pacote instalado",
         "  sqlite3 [ARQUIVO] abre o terminal SQL interativo",
         "  mkdir NOME cria um diretorio no disco",
@@ -837,6 +1092,7 @@ static void show_help(void)
         "  tasks      mostra tarefas do kernel em execucao",
         "  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa",
         "  cat NOME   mostra um arquivo do disco",
+        "  run NOME [ARGS...] executa um ELF64 Linux do ext4",
         "  halt       para a CPU",
         "  reboot     reinicia a maquina"
     };
@@ -853,6 +1109,147 @@ static void show_help(void)
     }
 }
 
+static void report_arch_package_install(int extracted)
+{
+    if (!extracted) {
+        print("Falha ao extrair o pacote Arch.\n");
+        return;
+    }
+    char package_name[64], package_version[96];
+    if (!archpkg_package_info(package_name, sizeof(package_name),
+                              package_version, sizeof(package_version))) {
+        print("Arquivos extraidos, mas .PKGINFO nao foi encontrado.\n");
+        return;
+    }
+    int registered = pacman_register_arch(package_name, package_version);
+    if (registered == 1) {
+        print("Pacote Arch registrado: "); print(package_name); put_char(' ');
+        print(package_version); put_char('\n');
+    } else if (registered == 0) {
+        print("Arquivos extraidos; pacote ja constava na base: "); print(package_name); put_char('\n');
+    } else {
+        print("Arquivos extraidos, mas falhou o registro de "); print(package_name); put_char('\n');
+    }
+    size_t dependency_count = archpkg_dependency_count();
+    if (dependency_count) {
+        print("Dependencias declaradas no .PKGINFO:\n");
+        for (size_t i = 0; i < dependency_count; ++i) {
+            char dependency[96], package[64];
+            if (!archpkg_dependency(i, dependency, sizeof(dependency))) continue;
+            print("  "); print(dependency);
+            size_t n = 0;
+            while (dependency[n] && dependency[n] != '=' && dependency[n] != '<' &&
+                   dependency[n] != '>' && dependency[n] != ' ') ++n;
+            int soname = 0;
+            for (size_t j = 0; j + 2 < n; ++j)
+                if (dependency[j] == '.' && dependency[j + 1] == 's' && dependency[j + 2] == 'o') soname = 1;
+            if (!soname && n && n < sizeof(package)) {
+                for (size_t j = 0; j < n; ++j) package[j] = dependency[j];
+                package[n] = 0;
+                int installed = pacman_package_installed(package);
+                if (installed == 0) print(" (nao instalado)");
+                else if (installed < 0) print(" (estado desconhecido)");
+            }
+            put_char('\n');
+        }
+    }
+}
+
+static void report_arch_download(const char *package_name)
+{
+    print("Baixando pacote Arch e dependencias: ");
+    print(package_name);
+    put_char('\n');
+}
+
+static void report_arch_extract_progress(size_t entries)
+{
+    char package_name[64], package_version[96];
+    print("Extraindo ");
+    if (archpkg_package_info(package_name, sizeof(package_name),
+                             package_version, sizeof(package_version))) print(package_name);
+    else print("pacote Arch");
+    print(": ");
+    print_u32((uint32_t)entries);
+    print(" entradas gravadas.\n");
+}
+
+static void report_arch_install_error(void)
+{
+    int error = archrepo_last_error();
+    print("Etapa do pacman: ");
+    if (error == ARCHREPO_ERROR_PACKAGE_NAME) print("nome de pacote ou limite da resolucao invalido");
+    else if (error == ARCHREPO_ERROR_PACKAGE_DATABASE) {
+        print("leitura da base local (");
+        int database_error = pacman_last_database_error();
+        if (database_error == 1) print("falha ao abrir local.db");
+        else if (database_error == 2) print("local.db excede o limite");
+        else if (database_error == 3) print("falha ao ler bloco de local.db");
+        else if (database_error == 4) print("nome de pacote invalido");
+        else if (database_error == 5) print("falha ao abrir /var/lib/pacman");
+        else print("erro desconhecido");
+        put_char(')');
+    }
+    else if (error == ARCHREPO_ERROR_METADATA) print("consulta de metadados no Arch");
+    else if (error == ARCHREPO_ERROR_DEPENDENCY) print("instalacao de uma dependencia");
+    else if (error == ARCHREPO_ERROR_CACHE) print("preparacao do cache em /var/cache/pacman/pkg");
+    else if (error == ARCHREPO_ERROR_DOWNLOAD) print("download do arquivo do repositorio");
+    else if (error == ARCHREPO_ERROR_EXTRACT) {
+        int detail = archpkg_last_error();
+        print("extracao do pacote tar.zst (");
+        if (detail == ARCHPKG_ERROR_ARCHIVE_READ) print("leitura do arquivo");
+        else if (detail == ARCHPKG_ERROR_ZSTD_INIT) print("inicializacao do decoder zstd");
+        else if (detail == ARCHPKG_ERROR_ZSTD_DECODE) print("frame zstd invalido ou incompleto");
+        else if (detail == ARCHPKG_ERROR_TEMP_WRITE) print("gravacao do tar temporario");
+        else if (detail == ARCHPKG_ERROR_TAR_FORMAT) print("formato tar ou .PKGINFO invalido");
+        else if (detail == ARCHPKG_ERROR_TAR_FILESYSTEM) {
+            print("sistema de arquivos (");
+            int operation = archpkg_last_filesystem_error();
+            if (operation == ARCHPKG_FS_ERROR_PATH) print("preparacao do diretorio");
+            else if (operation == ARCHPKG_FS_ERROR_REPLACE) print("substituicao de arquivo existente");
+            else if (operation == ARCHPKG_FS_ERROR_SYMLINK) print("criacao de link simbolico");
+            else if (operation == ARCHPKG_FS_ERROR_HARDLINK) print("criacao de link fisico");
+            else if (operation == ARCHPKG_FS_ERROR_FILE_OPEN) print("abertura do arquivo para gravacao");
+            else if (operation == ARCHPKG_FS_ERROR_FILE_READ) print("leitura do conteudo tar");
+            else if (operation == ARCHPKG_FS_ERROR_FILE_WRITE) print("gravacao de bloco (disco cheio ou erro I/O)");
+            else if (operation == ARCHPKG_FS_ERROR_FILE_FINISH) print("finalizacao do arquivo");
+            else print("operacao desconhecida");
+            print(")");
+        }
+        else if (detail == ARCHPKG_ERROR_MANIFEST) print("manifesto excedeu o limite ou nao pode ser salvo");
+        else print("erro interno");
+        const char *path = archpkg_last_failed_path();
+        if (path && *path) { print(": "); print(path); }
+        put_char(')');
+    }
+    else if (error == ARCHREPO_ERROR_PACKAGE_INFO) print("leitura dos metadados .PKGINFO");
+    else if (error == ARCHREPO_ERROR_REGISTER) print("registro do pacote na base local");
+    else print("desconhecida");
+    put_char('.');put_char('\n');
+}
+
+static int install_package_archive(const char *archive)
+{
+    size_t archive_length = 0;
+    while (archive[archive_length]) ++archive_length;
+    if (archive_length >= 12 && streq(archive + archive_length - 12, ".pkg.tar.zst")) {
+        int result = archpkg_install_zstd(archive);
+        report_arch_package_install(result);
+        return result;
+    }
+    if (archive_length >= 8 && streq(archive + archive_length - 8, ".pkg.tar")) {
+        int result = archpkg_install_tar(archive);
+        report_arch_package_install(result);
+        return result;
+    }
+    int result = pacman_install_local(archive);
+    if (result == 1) print("Pacote maiOS instalado e registrado na base local.\n");
+    else if (result == -2) print("O pacote ja esta instalado.\n");
+    else if (result == -3) print("O arquivo de destino ja existe em /apps.\n");
+    else print("Falha ao instalar. Use .mpk, .pkg.tar ou .pkg.tar.zst.\n");
+    return result == 1;
+}
+
 static void execute_command(char *command)
 {
     reap_background_python();
@@ -862,7 +1259,13 @@ static void execute_command(char *command)
         return;
     }
 
-    if (streq(command, "help")) {
+    if (starts_with(command, "run ")) {
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!command[4]) print("Uso: run EXECUTAVEL [ARGUMENTOS...]\n");
+        else run_linux_file(command + 4);
+    } else if (streq(command, "run")) {
+        print("Uso: run EXECUTAVEL [ARGUMENTOS...]\n");
+    } else if (streq(command, "help")) {
         show_help();
     } else if (streq(command, "pacman -Q") || streq(command, "pacman -Qq")) {
         if (!disk_ready) print("Disco indisponivel.\n");
@@ -880,16 +1283,37 @@ static void execute_command(char *command)
             if (result < 0) print("Erro ao ler a base local do pacman.\n");
             else if (!result) { print("Pacote nao instalado: "); print(name); put_char('\n'); }
         }
-    } else if (starts_with(command, "pacman -U ")) {
-        const char *archive = command + 10;
+    } else if (starts_with(command, "pacman -S ") || starts_with(command, "pacman -s ")) {
         if (!disk_ready) print("Disco indisponivel.\n");
-        else if (!*archive) print("Uso: pacman -U ARQUIVO.mpk\n");
+        else if (!network_stack_ready) print("Rede indisponivel; use pacman -U com arquivos locais.\n");
         else {
-            int result = pacman_install_local(archive);
-            if (result == 1) print("Pacote instalado em /apps e registrado na base local.\n");
-            else if (result == -2) print("O pacote ja esta instalado.\n");
-            else if (result == -3) print("O arquivo de destino ja existe em /apps.\n");
-            else print("Falha ao instalar. O arquivo deve ser um pacote local MAIOSPKG1 valido.\n");
+            char *cursor = command + 10;
+            char *name = next_argument(&cursor);
+            if (!name) print("Uso: pacman -S PACOTE [PACOTE ...]\n");
+            while (name) {
+                archpkg_set_progress_callback(report_arch_extract_progress);
+                int installed = archrepo_install(name, report_arch_download);
+                archpkg_set_progress_callback(0);
+                if (!installed) {
+                    if (net_https_last_error() != NET_HTTPS_ERROR_NONE) print_https_failure();
+                    report_arch_install_error();
+                    print("Falha ao baixar, resolver dependencias ou instalar: ");
+                    print(name); put_char('\n');
+                    break;
+                }
+                name = next_argument(&cursor);
+            }
+        }
+    } else if (starts_with(command, "pacman -U ")) {
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else {
+            char *cursor = command + 10;
+            char *archive = next_argument(&cursor);
+            if (!archive) print("Uso: pacman -U ARQUIVO [ARQUIVO ...]\n");
+            while (archive) {
+                if (!install_package_archive(archive)) break;
+                archive = next_argument(&cursor);
+            }
         }
     } else if (starts_with(command, "pacman -R ")) {
         const char *name = command + 10;
@@ -899,10 +1323,11 @@ static void execute_command(char *command)
             int result = pacman_remove(name);
             if (result == 1) print("Pacote removido.\n");
             else if (result == 0) { print("Pacote nao instalado: "); print(name); put_char('\n'); }
+            else if (result == -4) print("Remocao de pacotes Arch ainda nao e suportada.\n");
             else print("Falha ao remover o pacote.\n");
         }
     } else if (streq(command, "pacman") || starts_with(command, "pacman ")) {
-        print("Uso: pacman -Q | -Qq | -Qi NOME | -U ARQUIVO.mpk | -R NOME\n");
+        print("Uso: pacman -Q | -Qq | -Qi NOME | -S PACOTE | -U ARQUIVO | -R NOME\n");
     } else if (streq(command, "tasks")) {
         print("Tarefas ativas: "); print_u32(task_count()); put_char('\n');
         if (background_python_state == 1) print("Python em segundo plano: ativo.\n");
@@ -1297,6 +1722,7 @@ static void execute_command(char *command)
 
 /* Teclado PS/2 Set 1, com posições ABNT2. ç/Ç usam glifos CP437 da VGA. */
 static const char keymap[128] = {
+    [0x01]=0x1b,
     [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',
     [0x07]='6',[0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',
     [0x0C]='-',[0x0D]='=',[0x0E]='\b',[0x0F]='\t',
@@ -1341,7 +1767,20 @@ static char read_key(void)
             if (is_extended && code == 0x1D) { right_control = !released; continue; }
             if (is_extended && code == 0x38) { altgr = !released; continue; }
             if (!is_extended && code == 0x3A && !released) { caps_lock = !caps_lock; continue; }
-            if (released || is_extended) continue;
+            if (released) continue;
+            if (is_extended) {
+                if (code == 0x48) return (char)0x80;
+                if (code == 0x50) return (char)0x81;
+                if (code == 0x4B) return (char)0x82;
+                if (code == 0x4D) return (char)0x83;
+                if (code == 0x47) return (char)0x84;
+                if (code == 0x4F) return (char)0x85;
+                if (code == 0x53) return (char)0x86;
+                if (code == 0x49) return (char)0x88;
+                if (code == 0x51) return (char)0x89;
+                if (code == 0x52) return (char)0x8A;
+                continue;
+            }
             char value = keymap[code];
             uint8_t shifted = left_shift || right_shift;
             if (altgr && altgr_keymap[code]) value = altgr_keymap[code];
@@ -1384,11 +1823,74 @@ static void write_interactive(const char *name)
             line_length = 0;
         } else if (key == '\b') {
             if (line_length) { --line_length; put_char('\b'); }
-        } else if (key != '\t' && line_length < INPUT_SIZE - 1) {
+        } else if ((uint8_t)key >= 0x20 && (uint8_t)key < 0x7f && line_length < INPUT_SIZE - 1) {
             line[line_length++] = key;
             put_char(key);
         }
     }
+}
+
+void maios_linux_console_write(const char *text, size_t length)
+{
+    for (size_t i = 0; i < length; ++i) linux_console_emit(text[i]);
+}
+
+void maios_linux_console_set_echo(int enabled)
+{
+    linux_console_echo = enabled != 0;
+}
+
+void maios_linux_console_reset(void)
+{
+    if (linux_alt_screen_active) {
+        for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i)
+            VGA_MEMORY[i] = linux_primary_screen[i];
+        cursor_x = linux_primary_cursor_x;
+        cursor_y = linux_primary_cursor_y;
+        ansi_cursor_visible = linux_primary_cursor_visible;
+        ansi_scroll_top = linux_primary_scroll_top;
+        ansi_scroll_bottom = linux_primary_scroll_bottom;
+        linux_alt_screen_active = 0;
+    }
+    ansi_state = 0;
+    ansi_cursor_visible = 1;
+    ansi_scroll_top = 0;
+    ansi_scroll_bottom = VGA_HEIGHT - 1;
+    linux_console_echo = 1;
+    linux_process_active = 0;
+    update_hardware_cursor();
+}
+
+void maios_linux_console_process_active(int active)
+{
+    linux_process_active = active != 0;
+}
+
+int maios_linux_console_read_char(void)
+{
+    static const char *sequence;
+    static size_t sequence_offset, sequence_length;
+    static char queued_sequence[4];
+    if (sequence_offset < sequence_length) return (unsigned char)sequence[sequence_offset++];
+    sequence = 0; sequence_offset = sequence_length = 0;
+    unsigned char key = (unsigned char)read_key();
+    switch (key) {
+    case 0x80: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'A'; sequence_length = 3; break;
+    case 0x81: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'B'; sequence_length = 3; break;
+    case 0x82: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'D'; sequence_length = 3; break;
+    case 0x83: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'C'; sequence_length = 3; break;
+    case 0x84: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'H'; sequence_length = 3; break;
+    case 0x85: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'F'; sequence_length = 3; break;
+    case 0x86: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = '3'; queued_sequence[3] = '~'; sequence_length = 4; break;
+    case 0x88: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = '5'; queued_sequence[3] = '~'; sequence_length = 4; break;
+    case 0x89: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = '6'; queued_sequence[3] = '~'; sequence_length = 4; break;
+    case 0x8A: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = '2'; queued_sequence[3] = '~'; sequence_length = 4; break;
+    default: break;
+    }
+    int result = sequence_length ? (sequence = queued_sequence, sequence_offset = 1,
+                                   (unsigned char)sequence[0]) : key;
+    if (linux_console_echo && key < 0x80 && key != 4) put_char((char)key);
+    return result;
 }
 
 static void prompt(void)
@@ -1401,7 +1903,18 @@ void kernel_main(void)
     char input[INPUT_SIZE];
     size_t length = 0;
 
+    /* Keep console output on COM1 so it survives a VGA screen reset. */
+    outb(0x3F9, 0x00);
+    outb(0x3FB, 0x80);
+    outb(0x3F8, 0x03);
+    outb(0x3F9, 0x00);
+    outb(0x3FB, 0x03);
+    outb(0x3FA, 0xC7);
+    outb(0x3FC, 0x0B);
+    serial_console_ready = 1;
     clear_screen();
+    if (memory_init()) print("Memoria x86_64 pronta para paginas de usuario.\n");
+    else print("Memoria insuficiente para paginas de usuario.\n");
     disk_ready = ext4_mount();
     uint8_t mac[6];
     int network_device_ready = e1000_init(mac);
@@ -1442,7 +1955,7 @@ void kernel_main(void)
             }
         } else if (key == '\t') {
             length = autocomplete_command(input, length);
-        } else if (key != '\t' && length < INPUT_SIZE - 1) {
+        } else if ((uint8_t)key >= 0x20 && (uint8_t)key < 0x7f && length < INPUT_SIZE - 1) {
             input[length++] = key;
             put_char(key);
         }

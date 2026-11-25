@@ -34,9 +34,11 @@ CPYTHON_KERNEL_OBJECT = build/cpython-kernel.o
 PYTHON_STDLIB_ZIP = build/python311.zip
 PYTHON_WHEELS := $(wildcard third_party/django_wheels/*.whl)
 KERNEL_IMAGE ?= kernel-cpython.elf
+GRUB_ISO = maios-grub.iso
+GRUB_ISO_ROOT = build/grub/iso
 ARCH_STAMP = build/x86_64.stamp
 
-.PHONY: all run clean micropython-force install-python-stdlib
+.PHONY: all run run-grub run-pvh grub-iso clean micropython-force install-python-stdlib
 
 all: $(KERNEL_IMAGE)
 
@@ -44,8 +46,20 @@ $(ARCH_STAMP):
 	@mkdir -p $(dir $@)
 	@touch $@
 
-$(KERNEL_IMAGE) kernel.elf: boot.o scheduler.o linux_compat.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker.ld
-	$(LD) $(LDFLAGS) -o $@ boot.o scheduler.o linux_compat.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
+$(KERNEL_IMAGE) kernel.elf: boot.o scheduler.o linux_compat.o linux_elf.o linux_fs.o memory.o archpkg.o archrepo.o zstd.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker.ld
+	$(LD) $(LDFLAGS) -o $@ boot.o scheduler.o linux_compat.o linux_elf.o linux_fs.o memory.o archpkg.o archrepo.o zstd.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
+
+kernel-pvh.elf: boot.o scheduler.o linux_compat.o linux_elf.o linux_fs.o memory.o archpkg.o archrepo.o zstd.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_ADAPTER) linker-pvh.ld
+	$(LD) -m elf_x86_64 -T linker-pvh.ld -o $@ boot.o scheduler.o linux_compat.o linux_elf.o linux_fs.o memory.o archpkg.o archrepo.o zstd.o $(CPYTHON_KERNEL_OBJECT) pacman.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a $(CPYTHON_ADAPTER) $(CPYTHON_ARCHIVE) $(CPYTHON_RUNTIME) $(CPYTHON_LIBGCC)
+
+archpkg.o: archpkg.c archpkg.h ext4.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -Ithird_party/zstd -c $< -o $@
+
+archrepo.o: archrepo.c archrepo.h archpkg.h pacman.h net.h ext4.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+zstd.o: third_party/zstd/zstddeclib.c third_party/zstd/zstd.h third_party/zstd/zstd_errors.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -fno-builtin -Ithird_party/zstd -c $< -o $@
 
 boot.o: boot.s $(ARCH_STAMP)
 	$(AS) $(ASFLAGS) -c $< -o $@
@@ -53,16 +67,25 @@ boot.o: boot.s $(ARCH_STAMP)
 scheduler.o: scheduler.c scheduler.h linux_compat.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-pacman.o: pacman.c pacman.h ext4.h $(ARCH_STAMP)
+pacman.o: pacman.c pacman.h archpkg.h ext4.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-linux_compat.o: linux_compat.c linux_compat.h $(ARCH_STAMP)
+linux_compat.o: linux_compat.c linux_compat.h linux_fs.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel.o: kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h pacman.h $(ARCH_STAMP)
+linux_elf.o: linux_elf.c linux_elf.h linux_compat.h memory.h ext4.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+linux_fs.o: linux_fs.c linux_fs.h ext4.h memory.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+memory.o: memory.c memory.h $(ARCH_STAMP)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+kernel.o: kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h pacman.h archrepo.h memory.h linux_elf.h linux_compat.h $(ARCH_STAMP)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
-$(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h $(ARCH_STAMP)
+$(CPYTHON_KERNEL_OBJECT): kernel.c third_party/cpython/ports/maios/cpython_port.h scheduler.h pacman.h archpkg.h archrepo.h memory.h linux_elf.h linux_compat.h $(ARCH_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(CPYTHON_PORT) -c $< -o $@
 
@@ -136,11 +159,27 @@ ext4-2g.img:
 install-python-stdlib: ext4-2g.img $(PYTHON_STDLIB_ZIP)
 	python3 tools/install_python_stdlib.py ext4-2g.img $(PYTHON_STDLIB_ZIP) --demo examples/django_demo.py
 
-run: $(KERNEL_IMAGE) ext4-2g.img install-python-stdlib
-	qemu-system-x86_64 -cpu max -k pt-br -kernel $(KERNEL_IMAGE) -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070
+run: run-grub
+
+run-pvh: kernel-pvh.elf ext4-2g.img install-python-stdlib
+	qemu-system-x86_64 -m 256M -cpu max -k pt-br -kernel kernel-pvh.elf -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070 -serial stdio -no-reboot
+
+grub-iso: $(KERNEL_IMAGE) grub/grub.cfg
+	command -v grub-mkrescue >/dev/null || { echo "Falta grub-mkrescue. No Arch: sudo pacman -S grub xorriso mtools; no Debian/Ubuntu: sudo apt install grub-pc-bin grub-common xorriso mtools."; exit 1; }
+	command -v grub-file >/dev/null || { echo "Falta grub-file. No Arch: sudo pacman -S grub; no Debian/Ubuntu: sudo apt install grub-common."; exit 1; }
+	command -v xorriso >/dev/null || { echo "Falta xorriso. No Arch: sudo pacman -S xorriso; no Debian/Ubuntu: sudo apt install xorriso."; exit 1; }
+	command -v mformat >/dev/null || { echo "Falta mformat. No Arch: sudo pacman -S mtools; no Debian/Ubuntu: sudo apt install mtools."; exit 1; }
+	grub-file --is-x86-multiboot $(KERNEL_IMAGE)
+	mkdir -p $(GRUB_ISO_ROOT)/boot/grub
+	cp $(KERNEL_IMAGE) $(GRUB_ISO_ROOT)/boot/kernel.elf
+	cp grub/grub.cfg $(GRUB_ISO_ROOT)/boot/grub/grub.cfg
+	grub-mkrescue -o $(GRUB_ISO) $(GRUB_ISO_ROOT)
+
+run-grub: grub-iso ext4-2g.img install-python-stdlib
+	qemu-system-x86_64 -m 256M -cpu max -k pt-br -cdrom $(GRUB_ISO) -boot d -drive file=ext4-2g.img,format=raw,if=ide -nic user,model=e1000,hostfwd=tcp:127.0.0.1:8070-:8070 -serial stdio -no-reboot
 
 clean:
-	rm -f boot.o scheduler.o kernel.o pacman.o linux_compat.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf kernel-cpython.elf
+	rm -f boot.o scheduler.o kernel.o pacman.o archpkg.o archrepo.o zstd.o linux_compat.o linux_elf.o linux_fs.o memory.o gitpack.o ext4.o e1000.o net.o https.o https_roots.o freestanding.o libbearssl-maios.a kernel.elf kernel-cpython.elf kernel-pvh.elf $(GRUB_ISO)
 	rm -rf build/bearssl
 	rm -f $(ARCH_STAMP)
 	rm -rf $(CPYTHON_BUILD)

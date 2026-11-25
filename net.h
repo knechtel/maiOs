@@ -49,6 +49,13 @@ enum {
 };
 int net_tcp_last_send_error(void);
 enum {
+    NET_TCP_CONNECT_ERROR_NONE = 0,
+    NET_TCP_CONNECT_ERROR_FRAME,
+    NET_TCP_CONNECT_ERROR_RESET,
+    NET_TCP_CONNECT_ERROR_TIMEOUT
+};
+int net_tcp_last_connect_error(void);
+enum {
     NET_TCP_READ_ERROR_NONE = 0,
     NET_TCP_READ_ERROR_TIMEOUT,
     NET_TCP_READ_ERROR_RESET,

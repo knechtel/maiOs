@@ -44,7 +44,7 @@ typedef struct __attribute__((packed)) {
 static idt_entry_t idt[256];
 extern void irq0_stub(void);
 extern void yield_stub(void);
-extern void linux_syscall_entry(void);
+extern void *linux_exception_stub_table[];
 
 static inline void outb(uint16_t port, uint8_t value)
 {
@@ -76,7 +76,8 @@ void scheduler_init(void)
 {
     idt_set_gate(0x20, irq0_stub, 0x8E);
     idt_set_gate(0x30, yield_stub, 0x8E);
-    idt_set_gate(0x80, linux_syscall_entry, 0xEE);
+    for (unsigned int vector = 0; vector < 32; ++vector)
+        idt_set_gate(vector, (void (*)(void))linux_exception_stub_table[vector], 0x8E);
     linux_compat_init();
     __asm__ volatile("fninit; fxsave %0" : "=m"(initial_fpu_state));
     for (unsigned int i = 0; i < MAX_TASKS; ++i)

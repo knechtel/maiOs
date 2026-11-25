@@ -24,20 +24,41 @@ para sair.
 
 O gerenciador de pacotes está sendo desenvolvido em etapas. A base local fica
 em `/var/lib/pacman/local.db`; `pacman -Q` lista os registros, `pacman -Qq`
-mostra somente os nomes, `pacman -Qi NOME` consulta um registro, `pacman -U
-ARQUIVO.mpk` instala um pacote local e `pacman -R NOME` remove um pacote.
+mostra somente os nomes, `pacman -Qi NOME` consulta um registro, `pacman -S
+NOME` busca um pacote dos repositórios oficiais do Arch e suas dependências,
+`pacman -U ARQUIVO...` instala pacotes locais em sequência e `pacman -R NOME`
+remove um pacote registrado.
 Pacotes maiOS atuais contêm um único arquivo, instalado em `/apps`; podem ser
 criados no host com `python3 tools/make_maios_package.py NOME VERSAO ARQUIVO
 SAIDA.mpk`. O formato é uma linha `MAIOSPKG1 nome versão arquivo` terminada
 por newline, seguida pelos bytes do arquivo. Por exemplo, para instalar um
 script Python, coloque o `.mpk` no diretório atual do maiOS, rode `pacman -U
-SAIDA.mpk`, depois `cd /apps` e `python arquivo.py`. Repositórios sincronizados,
-dependências e executáveis Linux ainda não são suportados.
+SAIDA.mpk`, depois `cd /apps` e `python arquivo.py`. `pacman -U` também extrai
+`.pkg.tar` sem compressão e `.pkg.tar.zst` usando o decoder Zstandard embutido,
+para os caminhos do ext4, e registra `pkgname`/`pkgver` de `.PKGINFO` na base
+local. O manifesto permite remover arquivos do pacote com `pacman -R`; diretórios
+compartilhados ou ainda não vazios são mantidos. `pacman -S` consulta a interface
+de pacotes do Arch, baixa arquivos `.pkg.tar.zst` para
+`/var/cache/pacman/pkg` e tenta instalar dependências obrigatórias antes do
+pacote pedido. A resolução cobre os repositórios `core` e `extra`; atualizações,
+assinaturas, permissões Unix, scripts `.INSTALL` e dependências opcionais ainda
+não são tratados. A ABI Linux x86_64 ainda precisa ser validada executando o
+`vi` no QEMU.
 
-A base de boot agora transita do modo protegido de 32 bits para long mode,
-usa tabelas de páginas de 2 MiB e compila o kernel x86_64. A camada de syscalls
-continua incompleta: programas em ring 3, carregador ELF, isolamento por
-processo e chamadas Linux para arquivos e terminal ainda precisam ser portados.
+Para obter Vim dos repositórios Arch, conecte a rede no maiOS e rode
+`pacman -S vim`. Depois, tente iniciar o executável ELF64 com
+`run /usr/bin/vim`; o terminal compatível oferece `TERM=vt100` e 80x25.
+
+A base de boot transita do modo protegido de 32 bits para long mode e usa
+tabelas de páginas de 2 MiB. `run EXECUTAVEL [ARGS...]` carrega ELF64 x86_64
+do ext4 em ring 3; o carregador também lê `PT_INTERP` e inicia o interpretador
+dinâmico em um mapa de usuário que cobre os endereços x86_64 usuais. A camada
+de syscalls inclui memória (`brk`, `mmap` anônimo e de arquivo, `mprotect`,
+`munmap`), TLS, chamadas de arquivo ext4, sinais básicos e console com termios,
+setas e um subconjunto ANSI. A ABI Linux continua incompleta e ainda não foi
+validada executando um binário no QEMU. Portanto, o `vi` do Arch ainda não está
+confirmado como funcional.
+`make run` configura 256 MiB para o pool de páginas de usuário.
 
 Para gravar várias linhas, use `write NOME`, digite o conteúdo e finalize com um
 ponto sozinho em uma linha. `cat NOME` lê os blocos do arquivo em sequência.
@@ -260,4 +281,26 @@ terminal ou `Ctrl+Alt+G` para liberar o mouse e depois feche a janela.
 Se sua instalação do QEMU não aceitar um ELF Multiboot diretamente com
 `-kernel`, será necessário empacotar o mesmo `kernel.elf` em uma imagem de
 boot Multiboot (por exemplo, com GRUB).
+
+Para iniciar pelo GRUB em uma ISO, instale as ferramentas do host. No Arch
+(incluindo Omarchy):
+
+```sh
+sudo pacman -S grub xorriso mtools
+```
+
+No Debian/Ubuntu:
+
+```sh
+sudo apt install grub-pc-bin grub-common xorriso mtools
+```
+
+Depois execute:
+
+```sh
+make run-grub
+```
+
+O alvo `grub-iso` gera `maios-grub.iso`; `run-grub` inicia essa ISO no QEMU e
+anexa a imagem ext4 do maiOS.
 # maiOs

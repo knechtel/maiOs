@@ -108,9 +108,17 @@ static int tcp_tls_read(void *ctx,unsigned char *data,size_t length)
     https_last_io_direction=1;
     uint16_t received=0;
     if(length>1460)length=1460;
-    int result=net_tcp_receive(data,(uint16_t)length,&received);
-    https_last_tcp_read_error=net_tcp_last_read_error();
-    return result==1?(int)received:-1;
+    /* A TCP receive wait is finite. A quiet peer can simply be between
+       response packets, so let the same TLS read wait through several
+       receive timeouts instead of turning the first one into BR_ERR_IO. */
+    for(uint8_t attempt=0;attempt<5;attempt++){
+        int result=net_tcp_receive(data,(uint16_t)length,&received);
+        https_last_tcp_read_error=net_tcp_last_read_error();
+        if(result==1)return (int)received;
+        if(result==0&&https_last_tcp_read_error==NET_TCP_READ_ERROR_TIMEOUT)continue;
+        return -1;
+    }
+    return -1;
 }
 
 static int tcp_tls_write(void *ctx,const unsigned char *data,size_t length)
@@ -256,13 +264,15 @@ static int reader_chunked(https_reader_t *reader,net_https_sink_fn sink,
 }
 
 static int parse_http_response(https_reader_t *reader,net_https_sink_fn sink,void *context,
-                               uint32_t *body_length,uint16_t *status_code)
+                               uint32_t *body_length,uint16_t *status_code,
+                               char *location,uint16_t location_capacity)
 {
     char line[1024];
     if(!reader_line(reader,line,sizeof(line))||line[0]!='H'||line[1]!='T'||line[2]!='T'||line[3]!='P'||line[4]!='/')return 0;
     char *status=line;while(*status&&*status!=' ')status++;while(*status==' ')status++;
     if(status[0]<'0'||status[0]>'9'||status[1]<'0'||status[1]>'9'||status[2]<'0'||status[2]>'9')return 0;
     *status_code=(uint16_t)((status[0]-'0')*100+(status[1]-'0')*10+status[2]-'0');
+    if(location&&location_capacity)location[0]=0;
     uint8_t chunked=0,has_length=0,headers_done=0;uint32_t content_length=0;uint32_t header_bytes=0;
     for(uint16_t lines=0;lines<128;lines++){
         if(!reader_line(reader,line,sizeof(line)))return 0;
@@ -282,8 +292,15 @@ static int parse_http_response(https_reader_t *reader,net_https_sink_fn sink,voi
             if(!digits||*colon||(has_length&&value!=content_length))return 0;
             content_length=value;has_length=1;
         }else if(text_equal_ci(line,"Transfer-Encoding")&&text_contains_ci(colon,"chunked"))chunked=1;
+        else if(text_equal_ci(line,"Location")&&location&&location_capacity){
+            uint16_t n=0;while(colon[n]&&n+1<location_capacity){location[n]=colon[n];n++;}
+            while(n&&(location[n-1]==' '||location[n-1]=='\t'))n--;
+            location[n]=0;
+        }
     }
     if(!headers_done)return 0;
+    if(location&&location[0]&&(*status_code==301||*status_code==302||*status_code==303||
+       *status_code==307||*status_code==308)){sink=0;context=0;}
     *body_length=0;
     if((*status_code>=100&&*status_code<200)||*status_code==204||*status_code==304)return 1;
     if(chunked)return reader_chunked(reader,sink,context,body_length);
@@ -294,10 +311,10 @@ static int parse_http_response(https_reader_t *reader,net_https_sink_fn sink,voi
     return reader_close_delimited(reader,sink,context,body_length);
 }
 
-int net_https_request(const char *host,const char *path,const char *method,
+static int net_https_request_once(const char *host,const char *path,const char *method,
                       const char *headers,const uint8_t *body,uint32_t body_length,
                       net_https_sink_fn sink,void *context,uint32_t *response_length,
-                      uint16_t *status_code)
+                      uint16_t *status_code,char *location,uint16_t location_capacity)
 {
     uint32_t address,response_size=0;uint16_t request_length=0;char request[4096];uint8_t seed[32];
     https_last_error=NET_HTTPS_ERROR_NONE;https_last_tls_error=BR_ERR_OK;https_last_io_direction=0;https_last_tcp_read_error=NET_TCP_READ_ERROR_NONE;
@@ -349,12 +366,58 @@ int net_https_request(const char *host,const char *path,const char *method,
         offset+=count;
     }
     if(br_sslio_flush(&tls_io)<0){https_last_error=NET_HTTPS_ERROR_TLS;https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);(void)net_tcp_close();return 0;}
-    https_reader_t reader={0};int ok=parse_http_response(&reader,sink,context,&response_size,status_code);
+    https_reader_t reader={0};int ok=parse_http_response(&reader,sink,context,&response_size,status_code,location,location_capacity);
     if(!ok){https_last_tls_error=br_ssl_engine_last_error(&tls_client.eng);
         https_last_error=https_last_tls_error==BR_ERR_OK?NET_HTTPS_ERROR_HTTP:NET_HTTPS_ERROR_TLS;}
     (void)net_tcp_close();
     *response_length=response_size;
     return ok;
+}
+
+int net_https_request(const char *host,const char *path,const char *method,
+                      const char *headers,const uint8_t *body,uint32_t body_length,
+                      net_https_sink_fn sink,void *context,uint32_t *response_length,
+                      uint16_t *status_code)
+{
+    char current_host[254],current_path[1024],location[512];
+    if(!host||!path||!response_length||!status_code)return 0;
+    size_t hn=0,pn=0;
+    while(host[hn]&&hn+1<sizeof(current_host)){current_host[hn]=host[hn];hn++;}
+    while(path[pn]&&pn+1<sizeof(current_path)){current_path[pn]=path[pn];pn++;}
+    if(host[hn]||path[pn])return 0;
+    current_host[hn]=0;current_path[pn]=0;
+    for(uint8_t redirect=0;redirect<=5;redirect++){
+        uint32_t size=0;uint16_t status=0;location[0]=0;
+        if(!net_https_request_once(current_host,current_path,method,headers,body,body_length,
+                sink,context,&size,&status,location,sizeof(location))){
+            *response_length=size;*status_code=status;return 0;
+        }
+        if(!location[0]||(status!=301&&status!=302&&status!=303&&status!=307&&status!=308)){
+            *response_length=size;*status_code=status;return 1;
+        }
+        if(redirect==5){https_last_error=NET_HTTPS_ERROR_HTTP;return 0;}
+        if(location[0]=='/'){
+            size_t i=0;while(location[i]&&i+1<sizeof(current_path)){current_path[i]=location[i];i++;}
+            if(location[i]){https_last_error=NET_HTTPS_ERROR_HTTP;return 0;}
+            current_path[i]=0;
+        }else if(location[0]=='h'&&location[1]=='t'&&location[2]=='t'&&location[3]=='p'&&
+                 location[4]=='s'&&location[5]==':'&&location[6]=='/'&&location[7]=='/'){
+            const char *target=location+8;size_t i=0;
+            while(target[i]&&target[i]!='/'&&i+1<sizeof(current_host))i++;
+            if(!i||i+1>=sizeof(current_host)){https_last_error=NET_HTTPS_ERROR_HTTP;return 0;}
+            if(target[i]=='?'){https_last_error=NET_HTTPS_ERROR_HTTP;return 0;}
+            for(uint16_t j=0;j<i;j++)current_host[j]=target[j];
+            current_host[i]=0;
+            const char *new_path=target+i;
+            if(!*new_path){current_path[0]='/';current_path[1]=0;}
+            else {
+                size_t j=0;while(new_path[j]&&j+1<sizeof(current_path)){current_path[j]=new_path[j];j++;}
+                if(new_path[j]){https_last_error=NET_HTTPS_ERROR_HTTP;return 0;}
+                current_path[j]=0;
+            }
+        }else{https_last_error=NET_HTTPS_ERROR_HTTP;return 0;}
+    }
+    https_last_error=NET_HTTPS_ERROR_HTTP;return 0;
 }
 
 typedef struct {uint8_t *buffer;uint16_t capacity;uint16_t length;} memory_sink_t;

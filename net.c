@@ -62,9 +62,11 @@ static struct {
 static uint16_t tcp_port_seed=49152;
 static uint32_t tcp_sequence_seed=0x4D41494Fu;
 static int tcp_send_error;
+static int tcp_connect_error;
 static int tcp_read_error;
 
 int net_tcp_last_send_error(void){return tcp_send_error;}
+int net_tcp_last_connect_error(void){return tcp_connect_error;}
 int net_tcp_last_read_error(void){return tcp_read_error;}
 
 static uint16_t be16(const uint8_t *p) { return (uint16_t)p[0] << 8 | p[1]; }
@@ -417,7 +419,7 @@ static int dns_skip_name(const uint8_t *message,uint16_t length,uint16_t *offset
     return 0;
 }
 
-int net_dns_resolve(const char *name,uint32_t *address)
+static int net_dns_resolve_once(const char *name,uint32_t *address)
 {
     uint8_t query[512]={0},response[IPV4_PAYLOAD_MAX];udp_packet_t packet;
     if(!name||!address)return 0;
@@ -458,6 +460,13 @@ int net_dns_resolve(const char *name,uint32_t *address)
             if(!valid)return 0;
         }
     }
+    return 0;
+}
+
+int net_dns_resolve(const char *name,uint32_t *address)
+{
+    for(uint8_t attempt=0;attempt<3;attempt++)
+        if(net_dns_resolve_once(name,address))return 1;
     return 0;
 }
 
@@ -607,26 +616,40 @@ static int tcp_wait_ack(uint32_t expected)
 
 int net_tcp_connect(uint32_t destination,uint16_t port)
 {
+    tcp_connect_error=NET_TCP_CONNECT_ERROR_NONE;
     if(!destination||!port)return 0;
     tcp_state.address=destination;tcp_state.remote_port=port;
     tcp_state.local_port=tcp_port_seed++;if(tcp_port_seed<49152)tcp_port_seed=49152;
     tcp_state.send_sequence=++tcp_sequence_seed;tcp_state.connected=0;
     tcp_state.pending_length=0;tcp_state.pending_fin=0;
-    if(!tcp_send_segment(0x02,0,0))return 0;
+    if(!tcp_send_segment(0x02,0,0)){
+        tcp_connect_error=NET_TCP_CONNECT_ERROR_FRAME;
+        return 0;
+    }
     tcp_state.send_sequence++;
     uint8_t payload[TCP_MSS],flags;uint16_t length;uint32_t sequence,acknowledgment;
-    for(uint32_t wait=0;wait<3000000;wait++){
-        net_poll();
-        while(tcp_next_segment(&flags,&sequence,&acknowledgment,payload,sizeof(payload),&length)==1){
-            if(flags&0x04)return 0;
-            if((flags&0x12)==0x12&&acknowledgment==tcp_state.send_sequence){
-                tcp_state.receive_sequence=sequence+1;
-                if((length||(flags&0x01))&&!tcp_store_received(flags,sequence+1,payload,length))return 0;
-                if(!length&&!(flags&0x01)&&!tcp_send_segment(0x10,0,0))return 0;
-                tcp_state.connected=1;return 1;
+    for(uint8_t attempt=0;attempt<3;attempt++){
+        if(attempt && !tcp_send_segment(0x02,0,0)){
+            tcp_connect_error=NET_TCP_CONNECT_ERROR_FRAME;
+            return 0;
+        }
+        for(uint32_t wait=0;wait<3000000;wait++){
+            net_poll();
+            while(tcp_next_segment(&flags,&sequence,&acknowledgment,payload,sizeof(payload),&length)==1){
+                if(flags&0x04){tcp_connect_error=NET_TCP_CONNECT_ERROR_RESET;return 0;}
+                if((flags&0x12)==0x12&&acknowledgment==tcp_state.send_sequence){
+                    tcp_state.receive_sequence=sequence+1;
+                    if((length||(flags&0x01))&&!tcp_store_received(flags,sequence+1,payload,length))return 0;
+                    if(!length&&!(flags&0x01)&&!tcp_send_segment(0x10,0,0)){
+                        tcp_connect_error=NET_TCP_CONNECT_ERROR_FRAME;
+                        return 0;
+                    }
+                    tcp_state.connected=1;return 1;
+                }
             }
         }
     }
+    tcp_connect_error=NET_TCP_CONNECT_ERROR_TIMEOUT;
     return 0;
 }
 
