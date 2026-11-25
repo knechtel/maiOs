@@ -31,7 +31,7 @@
 typedef struct {
     uint8_t used, readable, writable, modified, directory;
     uint32_t flags;
-    uint32_t size, position, page_count;
+    uint32_t size, position, page_count, inode;
     uint64_t pages[FILE_PAGE_COUNT];
     char path[128];
 } linux_file_t;
@@ -230,6 +230,9 @@ int64_t linux_fs_openat(uint64_t dirfd, uint64_t user_path, uint64_t flags, uint
         file->flags = (uint32_t)flags;
         size_t n = 0; while (canonical[n] && n + 1 < sizeof(file->path)) { file->path[n] = canonical[n]; ++n; }
         file->path[n] = 0;
+        if (!ext4_inode_number(file->path, &file->inode)) {
+            discard_file(file); (void)ext4_chdir(prior_directory); return -LINUX_EIO;
+        }
         (void)ext4_chdir(prior_directory);
         return FD_FIRST + (int64_t)index;
     }
@@ -276,6 +279,9 @@ int64_t linux_fs_openat(uint64_t dirfd, uint64_t user_path, uint64_t flags, uint
             discard_file(file);
             return -LINUX_EIO;
         }
+        if (!ext4_inode_number(file->path, &file->inode)) {
+            discard_file(file); return -LINUX_EIO;
+        }
         return FD_FIRST + (int64_t)index;
     }
     if (!(flags & O_TRUNC) && file_size) {
@@ -310,6 +316,9 @@ int64_t linux_fs_openat(uint64_t dirfd, uint64_t user_path, uint64_t flags, uint
     if (flags & O_TRUNC) { file->size = 0; file->modified = 1; }
     if (flags & O_APPEND) file->position = file->size;
     path_leave(original_directory);
+    if (!ext4_inode_number(file->path, &file->inode)) {
+        discard_file(file); return -LINUX_EIO;
+    }
     return FD_FIRST + (int64_t)index;
 }
 
@@ -412,10 +421,17 @@ int64_t linux_fs_seek(uint64_t fd, int64_t offset, uint64_t whence)
 
 int64_t linux_fs_fstat(uint64_t fd, uint64_t user_stat)
 {
+    if (fd < 3) {
+        linux_stat_t stat = {0};
+        stat.st_dev = 1; stat.st_ino = fd + 1; stat.st_nlink = 1;
+        stat.st_mode = 0020600; /* console descriptors are character terminals */
+        stat.st_rdev = 0x880; stat.st_blksize = FILE_BLOCK_SIZE;
+        return memory_copy_to_user(user_stat, &stat, sizeof(stat)) ? 0 : -LINUX_EFAULT;
+    }
     linux_file_t *file = get_file(fd);
     if (!file) return -LINUX_EBADF;
     linux_stat_t stat = {0};
-    stat.st_dev = 1; stat.st_ino = fd; stat.st_nlink = 1;
+    stat.st_dev = 1; stat.st_ino = file->inode; stat.st_nlink = 1;
     stat.st_mode = file->directory ? 0040755 : 0100644; stat.st_size = file->size;
     stat.st_blksize = FILE_BLOCK_SIZE; stat.st_blocks = (file->size + 511u) / 512u;
     return memory_copy_to_user(user_stat, &stat, sizeof(stat)) ? 0 : -LINUX_EFAULT;
@@ -487,9 +503,10 @@ int64_t linux_fs_statx_path(uint64_t user_path, uint64_t user_statx)
     statx.blksize = FILE_BLOCK_SIZE;
     statx.nlink = 1;
     statx.mode = file->directory ? 0040755 : 0100644;
-    statx.ino = (uint64_t)fd;
+    statx.ino = file->inode;
     statx.size = file->size;
     statx.blocks = (file->size + 511u) / 512u;
+    statx.dev_minor = 1; /* same device number as st_dev = 1 in fstat */
     int copied = memory_copy_to_user(user_statx, &statx, sizeof(statx));
     int64_t closed = linux_fs_close((uint64_t)fd);
     return copied ? closed : -LINUX_EFAULT;

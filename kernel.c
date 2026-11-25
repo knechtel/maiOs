@@ -1754,6 +1754,14 @@ static char read_key(void)
     static uint8_t left_shift, right_shift, left_control, right_control, altgr, caps_lock, extended;
     for (;;) {
         if (network_stack_ready && !maios_background_server_active()) net_poll();
+        /* run-grub connects COM1 to the host terminal; pass its typed bytes
+           through directly so Linux programs can read from the visible console. */
+        if (serial_console_ready && (inb(0x3FD) & 1u)) {
+            uint8_t value = inb(0x3F8);
+            if (value == '\r') return '\n';
+            if (value == 0x7f) return '\b';
+            return (char)value;
+        }
         if (inb(0x64) & 1) {
             uint8_t scan = inb(0x60);
             if (scan == 0xE0) { extended = 1; continue; }

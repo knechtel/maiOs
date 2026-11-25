@@ -16,7 +16,7 @@ extern void maios_linux_console_process_active(int active);
 #define ELF_ET_DYN 3u
 #define ELF_EM_X86_64 62u
 #define ELF_MAX_PROGRAM_HEADERS 64u
-#define ELF_STACK_PAGES 8u
+#define ELF_STACK_PAGES 256u
 #define PAGE_SIZE 4096u
 #define MAX_ELF_IMAGE (8u * 1024u * 1024u)
 #define MAIN_PIE_OFFSET 0x100000000ull
