@@ -275,6 +275,12 @@ typedef struct {
     uint8_t line, cc[19];
 } linux_kernel_termios_t;
 
+typedef struct {
+    uint32_t iflag, oflag, cflag, lflag;
+    uint8_t line, cc[19];
+    uint32_t ispeed, ospeed;
+} linux_kernel_termios2_t;
+
 typedef struct { uint16_t rows, columns, xpixel, ypixel; } linux_winsize_t;
 typedef struct { uint64_t base, length; } linux_iovec_t;
 
@@ -760,7 +766,7 @@ int64_t linux_syscall_dispatch(uint64_t *saved_registers)
     }
     if (nr == 16) { /* basic terminal ioctls */
         if (a1 > 2) return -LINUX_EBADF;
-        if (a2 == 0x5401u) { /* TCGETS */
+        if (a2 == 0x5401u || a2 == 0x802c542au) { /* TCGETS / TCGETS2 */
             linux_kernel_termios_t termios = { .iflag = 0x500u, .oflag = 0x5u,
                 .cflag = 0xbfu, .lflag = terminal_lflag };
             termios.cc[0] = 3;  /* VINTR */
@@ -772,12 +778,29 @@ int64_t linux_syscall_dispatch(uint64_t *saved_registers)
             termios.cc[8] = 17; /* VSTART */
             termios.cc[9] = 19; /* VSTOP */
             termios.cc[10] = 26;/* VSUSP */
+            if (a2 == 0x802c542au) {
+                linux_kernel_termios2_t termios2 = {0};
+                termios2.iflag = termios.iflag; termios2.oflag = termios.oflag;
+                termios2.cflag = termios.cflag; termios2.lflag = termios.lflag;
+                termios2.line = termios.line;
+                for (size_t i = 0; i < sizeof(termios.cc); ++i) termios2.cc[i] = termios.cc[i];
+                termios2.ispeed = 15; termios2.ospeed = 15; /* B38400 */
+                return memory_copy_to_user(a3, &termios2, sizeof(termios2)) ? 0 : -14;
+            }
             return memory_copy_to_user(a3, &termios, sizeof(termios)) ? 0 : -14;
         }
-        if (a2 == 0x5402u || a2 == 0x5403u || a2 == 0x5404u) { /* TCSETS* */
+        if (a2 == 0x5402u || a2 == 0x5403u || a2 == 0x5404u ||
+            a2 == 0x402c542bu || a2 == 0x402c542cu || a2 == 0x402c542du) {
+            /* TCSETS* / TCSETS*2 */
             linux_kernel_termios_t termios;
-            if (!memory_copy_from_user(&termios, a3, sizeof(termios))) return -14;
-            terminal_lflag = termios.lflag;
+            if (a2 == 0x402c542bu || a2 == 0x402c542cu || a2 == 0x402c542du) {
+                linux_kernel_termios2_t termios2;
+                if (!memory_copy_from_user(&termios2, a3, sizeof(termios2))) return -14;
+                terminal_lflag = termios2.lflag;
+            } else {
+                if (!memory_copy_from_user(&termios, a3, sizeof(termios))) return -14;
+                terminal_lflag = termios.lflag;
+            }
             maios_linux_console_set_echo((terminal_lflag & 0x8u) != 0);
             if (!(terminal_lflag & 0x2u)) canonical_length = canonical_offset = 0;
             return 0;

@@ -26,6 +26,7 @@ static uint8_t color = VGA_COLOR;
 static int serial_console_ready;
 static uint8_t linux_console_echo = 1;
 static uint8_t ansi_state, ansi_private, ansi_param_count, ansi_param_index;
+static uint8_t ansi_string_escape, linux_application_cursor_keys;
 static uint16_t ansi_params[4], saved_cursor_x, saved_cursor_y;
 static size_t ansi_scroll_top, ansi_scroll_bottom = VGA_HEIGHT - 1;
 static uint8_t ansi_cursor_visible = 1;
@@ -358,8 +359,50 @@ static void ansi_finish_csi(char final)
         if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1;
         if (cursor_x >= VGA_WIDTH) cursor_x = VGA_WIDTH - 1;
         break;
+    case 'G': case '`':
+        cursor_x = first > VGA_WIDTH ? VGA_WIDTH - 1 : first - 1;
+        break;
+    case 'd':
+        cursor_y = first > VGA_HEIGHT ? VGA_HEIGHT - 1 : first - 1;
+        break;
+    case 'a': cursor_x += first; if (cursor_x >= VGA_WIDTH) cursor_x = VGA_WIDTH - 1; break;
+    case 'e': cursor_y += first; if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1; break;
+    case 'E':
+        cursor_x = 0; cursor_y += first;
+        if (cursor_y >= VGA_HEIGHT) cursor_y = VGA_HEIGHT - 1;
+        break;
+    case 'F':
+        cursor_x = 0; cursor_y = first > cursor_y ? 0 : cursor_y - first;
+        break;
+    case '@': {
+        size_t count = first;
+        if (count > VGA_WIDTH - cursor_x) count = VGA_WIDTH - cursor_x;
+        for (size_t x = VGA_WIDTH; x-- > cursor_x + count;)
+            VGA_MEMORY[cursor_y * VGA_WIDTH + x] = VGA_MEMORY[cursor_y * VGA_WIDTH + x - count];
+        for (size_t x = cursor_x; x < cursor_x + count; ++x)
+            VGA_MEMORY[cursor_y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+        break;
+    }
+    case 'P': {
+        size_t count = first;
+        if (count > VGA_WIDTH - cursor_x) count = VGA_WIDTH - cursor_x;
+        for (size_t x = cursor_x; x + count < VGA_WIDTH; ++x)
+            VGA_MEMORY[cursor_y * VGA_WIDTH + x] = VGA_MEMORY[cursor_y * VGA_WIDTH + x + count];
+        for (size_t x = VGA_WIDTH - count; x < VGA_WIDTH; ++x)
+            VGA_MEMORY[cursor_y * VGA_WIDTH + x] = (uint16_t)((color << 8) | ' ');
+        break;
+    }
+    case 'X': {
+        size_t end = cursor_x + first;
+        if (end > VGA_WIDTH) end = VGA_WIDTH;
+        ansi_clear_line(cursor_x, end - 1);
+        break;
+    }
     case 'J':
-        if (ansi_params[0] == 2 || ansi_params[0] == 3) clear_screen();
+        if (ansi_params[0] == 2 || ansi_params[0] == 3) {
+            for (size_t i = 0; i < VGA_WIDTH * VGA_HEIGHT; ++i)
+                VGA_MEMORY[i] = (uint16_t)((color << 8) | ' ');
+        }
         else if (ansi_params[0] == 0) {
             ansi_clear_line(cursor_x, VGA_WIDTH - 1);
             for (size_t y = cursor_y + 1; y < VGA_HEIGHT; ++y)
@@ -394,6 +437,8 @@ static void ansi_finish_csi(char final)
     case 's': saved_cursor_x = (uint16_t)cursor_x; saved_cursor_y = (uint16_t)cursor_y; break;
     case 'u': cursor_x = saved_cursor_x; cursor_y = saved_cursor_y; break;
     case 'h': case 'l':
+        if (ansi_private && ansi_params[0] == 1)
+            linux_application_cursor_keys = final == 'h';
         if (ansi_private && ansi_params[0] == 25) ansi_cursor_visible = final == 'h';
         if (ansi_private && (ansi_params[0] == 47 || ansi_params[0] == 1047 ||
                              ansi_params[0] == 1049)) {
@@ -428,11 +473,48 @@ static void ansi_finish_csi(char final)
 
 static void linux_console_emit(char c)
 {
+    if (ansi_state == 3) { /* consume a character-set designation after ESC ( / ) */
+        ansi_state = 0;
+        return;
+    }
+    if (ansi_state == 4) { /* consume OSC/DCS/APC/PM strings until BEL or ST */
+        if (c == 0x07) { ansi_state = 0; ansi_string_escape = 0; }
+        else if (ansi_string_escape && c == '\\') {
+            ansi_state = 0; ansi_string_escape = 0;
+        } else ansi_string_escape = c == 0x1b;
+        return;
+    }
     if (ansi_state == 1) {
-        ansi_state = c == '[' ? 2 : 0;
-        if (ansi_state == 2) {
+        ansi_state = 0;
+        if (c == '[') {
+            ansi_state = 2;
             ansi_private = 0; ansi_param_count = 1; ansi_param_index = 0;
             for (size_t i = 0; i < 4; ++i) ansi_params[i] = 0;
+        } else if (c == '(' || c == ')' || c == '*' || c == '+' || c == '#') {
+            ansi_state = 3;
+        } else if (c == ']' || c == 'P' || c == '^' || c == '_') {
+            ansi_state = 4;
+            ansi_string_escape = 0;
+        } else if (c == '7') {
+            saved_cursor_x = (uint16_t)cursor_x;
+            saved_cursor_y = (uint16_t)cursor_y;
+        } else if (c == '8') {
+            cursor_x = saved_cursor_x < VGA_WIDTH ? saved_cursor_x : VGA_WIDTH - 1;
+            cursor_y = saved_cursor_y < VGA_HEIGHT ? saved_cursor_y : VGA_HEIGHT - 1;
+            update_hardware_cursor();
+        } else if (c == 'D') {
+            if (cursor_y == ansi_scroll_bottom) scroll_region_up(ansi_scroll_top, ansi_scroll_bottom, 1);
+            else if (cursor_y + 1 < VGA_HEIGHT) ++cursor_y;
+            update_hardware_cursor();
+        } else if (c == 'M') {
+            if (cursor_y == ansi_scroll_top) scroll_region_down(ansi_scroll_top, ansi_scroll_bottom, 1);
+            else if (cursor_y) --cursor_y;
+            update_hardware_cursor();
+        } else if (c == 'E') {
+            cursor_x = 0;
+            if (cursor_y == ansi_scroll_bottom) scroll_region_up(ansi_scroll_top, ansi_scroll_bottom, 1);
+            else if (cursor_y + 1 < VGA_HEIGHT) ++cursor_y;
+            update_hardware_cursor();
         }
         return;
     }
@@ -445,10 +527,11 @@ static void linux_console_emit(char c)
             ansi_params[ansi_param_index] = value > 999 ? 999 : (uint16_t)value;
             return;
         }
-        if (c == ';') {
+        if (c == ';' || c == ':') {
             if (ansi_param_index < 3) ++ansi_param_index;
             return;
         }
+        if ((unsigned char)c >= 0x20 && (unsigned char)c <= 0x2f) return;
         ansi_finish_csi(c);
         ansi_state = 0;
         return;
@@ -1861,6 +1944,8 @@ void maios_linux_console_reset(void)
         linux_alt_screen_active = 0;
     }
     ansi_state = 0;
+    ansi_string_escape = 0;
+    linux_application_cursor_keys = 0;
     ansi_cursor_visible = 1;
     ansi_scroll_top = 0;
     ansi_scroll_bottom = VGA_HEIGHT - 1;
@@ -1883,10 +1968,10 @@ int maios_linux_console_read_char(void)
     sequence = 0; sequence_offset = sequence_length = 0;
     unsigned char key = (unsigned char)read_key();
     switch (key) {
-    case 0x80: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'A'; sequence_length = 3; break;
-    case 0x81: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'B'; sequence_length = 3; break;
-    case 0x82: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'D'; sequence_length = 3; break;
-    case 0x83: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'C'; sequence_length = 3; break;
+    case 0x80: queued_sequence[0] = 0x1b; queued_sequence[1] = linux_application_cursor_keys ? 'O' : '['; queued_sequence[2] = 'A'; sequence_length = 3; break;
+    case 0x81: queued_sequence[0] = 0x1b; queued_sequence[1] = linux_application_cursor_keys ? 'O' : '['; queued_sequence[2] = 'B'; sequence_length = 3; break;
+    case 0x82: queued_sequence[0] = 0x1b; queued_sequence[1] = linux_application_cursor_keys ? 'O' : '['; queued_sequence[2] = 'D'; sequence_length = 3; break;
+    case 0x83: queued_sequence[0] = 0x1b; queued_sequence[1] = linux_application_cursor_keys ? 'O' : '['; queued_sequence[2] = 'C'; sequence_length = 3; break;
     case 0x84: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'H'; sequence_length = 3; break;
     case 0x85: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = 'F'; sequence_length = 3; break;
     case 0x86: queued_sequence[0] = 0x1b; queued_sequence[1] = '['; queued_sequence[2] = '3'; queued_sequence[3] = '~'; sequence_length = 4; break;
