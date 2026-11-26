@@ -50,6 +50,7 @@ static uint64_t rdmsr64(uint32_t msr);
 extern void linux_syscall_entry(void);
 extern void maios_linux_console_write(const char *, size_t);
 extern int maios_linux_console_read_char(void);
+extern int maios_linux_console_input_ready(void);
 extern void maios_linux_console_set_echo(int enabled);
 extern void maios_linux_console_reset(void);
 
@@ -338,7 +339,7 @@ static int64_t linux_select_ready(uint64_t nfds, uint64_t read_set,
             continue;
         }
         if (*read_word & bit) {
-            if (fd == 0 || fd >= 3) ++ready;
+            if ((fd == 0 && maios_linux_console_input_ready()) || fd >= 3) ++ready;
             else *read_word &= ~bit;
         }
         if (*write_word & bit) {
@@ -494,7 +495,8 @@ int64_t linux_syscall_dispatch(uint64_t *saved_registers)
             if (item.fd >= 0) {
                 if (!linux_fs_fd_valid((uint64_t)item.fd)) item.revents = 0x20; /* POLLNVAL */
                 else {
-                    if (item.fd == 0 && (item.events & 0x001)) item.revents |= 0x001; /* POLLIN */
+                    if (item.fd == 0 && (item.events & 0x001) &&
+                        maios_linux_console_input_ready()) item.revents |= 0x001; /* POLLIN */
                     if ((item.fd == 1 || item.fd == 2) && (item.events & 0x004)) item.revents |= 0x004; /* POLLOUT */
                     if (item.fd >= 3) item.revents |= item.events & (0x001 | 0x004);
                 }

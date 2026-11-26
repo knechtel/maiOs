@@ -24,6 +24,7 @@ static size_t cursor_x;
 static size_t cursor_y;
 static uint8_t color = VGA_COLOR;
 static int serial_console_ready;
+static uint8_t linux_console_batch;
 static uint8_t linux_console_echo = 1;
 static uint8_t ansi_state, ansi_private, ansi_param_count, ansi_param_index;
 static uint8_t ansi_string_escape, linux_application_cursor_keys;
@@ -299,7 +300,7 @@ static void scroll_region_up(size_t top, size_t bottom, size_t count)
 
 static void put_char(char c)
 {
-    if (serial_console_ready) {
+    if (serial_console_ready && !linux_console_batch) {
         unsigned int spins = 1000000;
         while (!(inb(0x3FD) & 0x20) && --spins) { }
         if (spins) outb(0x3F8, (uint8_t)c);
@@ -328,6 +329,7 @@ static void put_char(char c)
 
 static void update_hardware_cursor(void)
 {
+    if (linux_console_batch) return;
     uint16_t position = (uint16_t)(cursor_y * VGA_WIDTH + cursor_x);
     outb(0x3D4, 0x0A);
     uint8_t start = inb(0x3D5);
@@ -1923,7 +1925,20 @@ static void write_interactive(const char *name)
 
 void maios_linux_console_write(const char *text, size_t length)
 {
+    linux_console_batch = 1;
     for (size_t i = 0; i < length; ++i) linux_console_emit(text[i]);
+    linux_console_batch = 0;
+    update_hardware_cursor();
+    /* Keep the host's stdio terminal synchronized with Vim's ANSI output.
+       The VGA parser consumes control sequences, so put_char cannot mirror
+       them while it renders the same output locally. */
+    if (serial_console_ready) {
+        for (size_t i = 0; i < length; ++i) {
+            unsigned int spins = 1000000;
+            while (!(inb(0x3FD) & 0x20) && --spins) { }
+            if (spins) outb(0x3F8, (uint8_t)text[i]);
+        }
+    }
 }
 
 void maios_linux_console_set_echo(int enabled)
@@ -1984,6 +1999,11 @@ int maios_linux_console_read_char(void)
                                    (unsigned char)sequence[0]) : key;
     if (linux_console_echo && key < 0x80 && key != 4) put_char((char)key);
     return result;
+}
+
+int maios_linux_console_input_ready(void)
+{
+    return (serial_console_ready && (inb(0x3FD) & 1u)) || (inb(0x64) & 1u);
 }
 
 static void prompt(void)
