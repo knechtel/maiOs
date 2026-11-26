@@ -14,7 +14,7 @@ ceder a CPU com `task_yield()`. As tarefas compartilham memória e executam no
 mesmo núcleo; APIs de dispositivos e subsistemas com estado global não devem
 ser chamadas por tarefas concorrentes sem sincronização.
 
-Comandos disponíveis: `help`, `clear`, `echo`, `about`, `tasks`, `parallel`, `ls`, `cd`, `pwd`,
+Comandos disponíveis: `help`, `clear`, `echo`, `about`, `tasks`, `parallel`, `ls`, `cd`, `pwd`, `vi`,
 `mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `python-stop`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
@@ -46,8 +46,9 @@ não são tratados. A ABI Linux x86_64 ainda precisa ser validada executando o
 `vi` no QEMU.
 
 Para obter Vim dos repositórios Arch, conecte a rede no maiOS e rode
-`pacman -S vim`. Depois, tente iniciar o executável ELF64 com
-`run /usr/bin/vim`; o terminal compatível oferece `TERM=vt100` e 80x25.
+`pacman -S vim`. Abra o editor com `vi [ARQUIVO]`; o comando inicia
+`/usr/bin/vim` e repassa os argumentos. O terminal compatível oferece
+`TERM=vt100` e 80x25.
 
 A base de boot transita do modo protegido de 32 bits para long mode e usa
 tabelas de páginas de 2 MiB. `run EXECUTAVEL [ARGS...]` carrega ELF64 x86_64

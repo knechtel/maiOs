@@ -1173,6 +1173,7 @@ static void show_help(void)
         "  django-admin startproject NOME cria um projeto Django",
         "  django-admin startapp NOME cria uma aplicacao Django",
         "  python-stop encerra um servidor Python em segundo plano",
+        "  vi [ARQUIVO] abre /usr/bin/vim",
         "  parallel   executa duas tarefas concorrentes",
         "  tasks      mostra tarefas do kernel em execucao",
         "  write NOME TEXTO grava uma linha; sem TEXTO inicia escrita longa",
@@ -1344,7 +1345,25 @@ static void execute_command(char *command)
         return;
     }
 
-    if (starts_with(command, "run ")) {
+    if (streq(command, "vi") || starts_with(command, "vi ")) {
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else {
+            static const char executable[] = "/usr/bin/vim";
+            char invocation[INPUT_SIZE];
+            size_t used = 0;
+            while (executable[used]) {
+                invocation[used] = executable[used];
+                ++used;
+            }
+            if (command[2] == ' ') {
+                invocation[used++] = ' ';
+                for (size_t i = 3; command[i] && used < sizeof(invocation) - 1; ++i)
+                    invocation[used++] = command[i];
+            }
+            invocation[used] = '\0';
+            run_linux_file(invocation);
+        }
+    } else if (starts_with(command, "run ")) {
         if (!disk_ready) print("Disco indisponivel.\n");
         else if (!command[4]) print("Uso: run EXECUTAVEL [ARGUMENTOS...]\n");
         else run_linux_file(command + 4);
