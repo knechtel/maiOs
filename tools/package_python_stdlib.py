@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import pathlib
 import zipfile
 
@@ -42,7 +43,13 @@ def add_wheel(archive: zipfile.ZipFile, wheel: pathlib.Path) -> None:
                 continue
             if name.endswith((".pyc", ".pyo")):
                 continue
-            archive.writestr(archive_info(name), source.read(name))
+            contents = source.read(name)
+            archive.writestr(archive_info(name), contents)
+            if name == "django/contrib/auth/common-passwords.txt.gz":
+                archive.writestr(
+                    archive_info("django/contrib/auth/common-passwords.txt"),
+                    gzip.decompress(contents),
+                )
 
 
 def main() -> None:
