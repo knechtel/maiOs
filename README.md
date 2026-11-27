@@ -15,7 +15,7 @@ mesmo núcleo; APIs de dispositivos e subsistemas com estado global não devem
 ser chamadas por tarefas concorrentes sem sincronização.
 
 Comandos disponíveis: `help`, `clear`, `echo`, `about`, `tasks`, `parallel`, `ls`, `cd`, `pwd`, `vi`,
-`mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `python-stop`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
+`touch`, `mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `python-stop`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
 O driver mapeia blocos diretos e indiretos simples, duplos e triplos.
@@ -69,6 +69,8 @@ conteúdo, incluindo arquivos e subdiretórios. Esses comandos aceitam nomes
 simples, sem caminhos.
 Use `mv NOME_ATUAL NOVO_NOME` para renomear um arquivo no diretório atual; o
 destino não pode existir.
+Use `touch NOME` para criar um arquivo vazio no diretório atual. Se o arquivo
+já existir, o conteúdo é preservado.
 `python` abre o REPL CPython; `python ARQUIVO.py` executa um script salvo no
 diretório atual. Exemplo:
 

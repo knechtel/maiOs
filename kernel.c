@@ -603,7 +603,7 @@ static size_t autocomplete_command(char *input, size_t length)
         "git", "halt", "help", "https", "https-post", "https-save",
         "ifconfig", "ls", "mkdir", "mv", "parallel", "ping", "pwd",
         "django-admin", "python", "python-stop", "reboot", "rm", "rmdir", "sqlite3",
-        "tasks", "tcp", "write", "curl", "run"
+        "tasks", "tcp", "touch", "write", "curl", "run", "vi"
     };
     size_t token_length = 0;
     while (token_length < length && input[token_length] != ' ') ++token_length;
@@ -641,6 +641,64 @@ static size_t autocomplete_command(char *input, size_t length)
         for (size_t i = 0; i < count; ++i) {
             if (!starts_with(commands[i], input)) continue;
             print(commands[i]);
+            put_char(' ');
+        }
+        put_char('\n');
+        prompt();
+        for (size_t i = 0; i < length; ++i) put_char(input[i]);
+    }
+    return length;
+}
+
+static size_t autocomplete_argument(char *input, size_t length)
+{
+    size_t token_start = 0;
+    for (size_t i = 0; i < length; ++i)
+        if (input[i] == ' ') token_start = i + 1;
+    if (token_start == 0 || token_start == length || !disk_ready) return length;
+
+    size_t prefix_length = length - token_start;
+    if (prefix_length >= 64) return length;
+    char prefix[64];
+    for (size_t i = 0; i < prefix_length; ++i) prefix[i] = input[token_start + i];
+    prefix[prefix_length] = '\0';
+
+    ext4_entry_t entries[64];
+    int count = ext4_list(entries, sizeof(entries) / sizeof(entries[0]));
+    if (count <= 0) return length;
+    const ext4_entry_t *first = 0;
+    size_t matches = 0;
+    size_t common_length = 0;
+    for (int i = 0; i < count && i < (int)(sizeof(entries) / sizeof(entries[0])); ++i) {
+        if (!starts_with(entries[i].name, prefix)) continue;
+        size_t name_length = str_length(entries[i].name);
+        if (!first) {
+            first = &entries[i];
+            common_length = name_length;
+        } else {
+            size_t j = prefix_length;
+            while (j < common_length && j < name_length &&
+                   entries[i].name[j] == first->name[j]) ++j;
+            common_length = j;
+        }
+        ++matches;
+    }
+    if (!matches) return length;
+
+    while (prefix_length < common_length && length < INPUT_SIZE - 2) {
+        input[length] = first->name[prefix_length++];
+        put_char(input[length++]);
+    }
+    if (matches == 1 && length < INPUT_SIZE - 2) {
+        char suffix = first->directory ? '/' : ' ';
+        input[length++] = suffix;
+        put_char(suffix);
+    } else if (matches > 1) {
+        put_char('\n');
+        for (int i = 0; i < count && i < (int)(sizeof(entries) / sizeof(entries[0])); ++i) {
+            if (!starts_with(entries[i].name, prefix)) continue;
+            print(entries[i].name);
+            if (entries[i].directory) put_char('/');
             put_char(' ');
         }
         put_char('\n');
@@ -1136,6 +1194,7 @@ static void show_help(void)
 {
     static const char *const lines[]={
         "Comandos disponiveis:",
+        "  Tab completa comandos e arquivos nos argumentos",
         "  help       mostra esta ajuda",
         "  clear      limpa a tela",
         "  echo TEXTO escreve uma mensagem",
@@ -1167,6 +1226,7 @@ static void show_help(void)
         "  rm NOME    apaga um arquivo",
         "  mv ATUAL NOVO renomeia um arquivo",
         "  rmdir NOME apaga um diretorio vazio",
+        "  touch NOME cria um arquivo vazio sem sobrescrever existentes",
         "  python     inicia o REPL CPython",
         "  python ARQUIVO.py executa um script do ext4",
         "  python ARQUIVO.py & inicia o script em segundo plano",
@@ -1563,6 +1623,26 @@ static void execute_command(char *command)
         else print("rmdir: diretorio nao encontrado, nao vazio ou erro no disco.\n");
     } else if (streq(command,"rmdir")) {
         print("Uso: rmdir NOME (apaga um diretorio vazio no diretorio atual).\n");
+    } else if (starts_with(command, "touch ")) {
+        char *cursor = command + 6;
+        char *name = next_argument(&cursor);
+        if (!disk_ready) print("Disco indisponivel.\n");
+        else if (!name || next_argument(&cursor) || !valid_file_name(name))
+            print("Uso: touch NOME (cria um arquivo vazio no diretorio atual).\n");
+        else {
+            int type = ext4_entry_type(name);
+            if (type == 0) {
+                if (ext4_write(name, (const uint8_t *)"", 0))
+                    print("Arquivo vazio criado.\n");
+                else print("touch: erro ao criar o arquivo.\n");
+            } else if (type == 1 || type == 3) {
+                print("Arquivo ja existe; conteudo preservado.\n");
+            } else {
+                print("touch: o nome corresponde a um diretorio.\n");
+            }
+        }
+    } else if (streq(command, "touch")) {
+        print("Uso: touch NOME (cria um arquivo vazio no diretorio atual).\n");
     } else if (streq(command, "ls")) {
         if (disk_ready) list_files();
         else print("Disco ext4 indisponivel ou formato nao suportado.\n");
@@ -2086,7 +2166,12 @@ void kernel_main(void)
                 put_char('\b');
             }
         } else if (key == '\t') {
-            length = autocomplete_command(input, length);
+            size_t has_arguments = 0;
+            while (has_arguments < length && input[has_arguments] != ' ')
+                ++has_arguments;
+            length = has_arguments < length
+                ? autocomplete_argument(input, length)
+                : autocomplete_command(input, length);
         } else if ((uint8_t)key >= 0x20 && (uint8_t)key < 0x7f && length < INPUT_SIZE - 1) {
             input[length++] = key;
             put_char(key);
