@@ -14,7 +14,7 @@ ceder a CPU com `task_yield()`. As tarefas compartilham memória e executam no
 mesmo núcleo; APIs de dispositivos e subsistemas com estado global não devem
 ser chamadas por tarefas concorrentes sem sincronização.
 
-Comandos disponíveis: `help`, `clear`, `echo`, `about`, `tasks`, `parallel`, `ls`, `cd`, `pwd`, `vi`,
+Comandos disponíveis: `help`, `clear`, `echo`, `about`, `date`, `time`, `tasks`, `parallel`, `ls`, `cd`, `pwd`, `vi`,
 `touch`, `mkdir`, `rmdir`, `rm`, `delete`, `mv`, `write`, `cat`, `python`, `python-stop`, `sqlite3`, `curl`, `halt` e `reboot`. O kernel lê e grava uma imagem ext4
 por setores ATA PIO. `make run` cria e conecta `ext4-2g.img`, uma imagem ext4
 de 2 GiB, preservando `disk.img` e `ext4.img` preexistentes.
@@ -280,6 +280,9 @@ make run
 
 O terminal aparece na tela do emulador. Para sair do QEMU, use `Ctrl+C` no
 terminal ou `Ctrl+Alt+G` para liberar o mouse e depois feche a janela.
+
+Use `date` ou `time` no terminal para consultar a data e a hora do relógio RTC
+do sistema, exibidas como `DD/MM/AAAA HH:MM:SS`.
 
 Se sua instalação do QEMU não aceitar um ELF Multiboot diretamente com
 `-kernel`, será necessário empacotar o mesmo `kernel.elf` em uma imagem de

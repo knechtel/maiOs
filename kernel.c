@@ -599,11 +599,11 @@ static int starts_with(const char *text, const char *prefix)
 static size_t autocomplete_command(char *input, size_t length)
 {
     static const char *commands[] = {
-        "about", "cat", "cd", "clear", "delete", "dhcp", "dns", "echo",
+        "about", "cat", "cd", "clear", "date", "delete", "dhcp", "dns", "echo",
         "git", "halt", "help", "https", "https-post", "https-save",
         "ifconfig", "ls", "mkdir", "mv", "parallel", "ping", "pwd",
         "django-admin", "python", "python-stop", "reboot", "rm", "rmdir", "sqlite3",
-        "tasks", "tcp", "touch", "write", "curl", "run", "vi"
+        "tasks", "tcp", "time", "touch", "write", "curl", "run", "vi"
     };
     size_t token_length = 0;
     while (token_length < length && input[token_length] != ' ') ++token_length;
@@ -1199,6 +1199,8 @@ static void show_help(void)
         "  clear      limpa a tela",
         "  echo TEXTO escreve uma mensagem",
         "  about      informacoes do sistema",
+        "  date       mostra a data e a hora do relogio RTC",
+        "  time       mostra a data e a hora do relogio RTC",
         "  ls         lista arquivos e diretorios",
         "  cd CAMINHO muda de diretorio (use .. para voltar)",
         "  pwd        mostra o caminho atual",
@@ -1253,6 +1255,73 @@ static void show_help(void)
             clear_screen();page_lines=0;
         }
     }
+}
+
+static uint8_t rtc_read_register(uint8_t reg)
+{
+    outb(0x70, reg);
+    return inb(0x71);
+}
+
+static void print_two_digits(uint8_t value)
+{
+    put_char((char)('0' + value / 10));
+    put_char((char)('0' + value % 10));
+}
+
+static void show_date_time(void)
+{
+    uint8_t second, minute, hour, day, month, year, century, status;
+    unsigned int attempt;
+    for (attempt = 0; attempt < 100000; ++attempt) {
+        if (rtc_read_register(0x0A) & 0x80) continue;
+        second = rtc_read_register(0x00);
+        minute = rtc_read_register(0x02);
+        hour = rtc_read_register(0x04);
+        day = rtc_read_register(0x07);
+        month = rtc_read_register(0x08);
+        year = rtc_read_register(0x09);
+        century = rtc_read_register(0x32);
+        status = rtc_read_register(0x0B);
+        if (!(rtc_read_register(0x0A) & 0x80) && second == rtc_read_register(0x00)) break;
+    }
+    if (attempt == 100000) {
+        print("Relogio RTC indisponivel.\n");
+        return;
+    }
+    uint8_t pm = (hour & 0x80) != 0;
+    hour &= 0x7f;
+    if (!(status & 0x04)) {
+        second = (uint8_t)((second & 0x0f) + (second >> 4) * 10);
+        minute = (uint8_t)((minute & 0x0f) + (minute >> 4) * 10);
+        hour = (uint8_t)((hour & 0x0f) + (hour >> 4) * 10);
+        day = (uint8_t)((day & 0x0f) + (day >> 4) * 10);
+        month = (uint8_t)((month & 0x0f) + (month >> 4) * 10);
+        year = (uint8_t)((year & 0x0f) + (year >> 4) * 10);
+        century = (uint8_t)((century & 0x0f) + (century >> 4) * 10);
+    }
+    if (!(status & 0x02)) {
+        hour %= 12;
+        if (pm) hour += 12;
+    }
+    unsigned int full_year = century >= 19 && century <= 99
+        ? (unsigned int)century * 100u + year
+        : (year >= 70 ? 1900u + year : 2000u + year);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 ||
+        minute > 59 || second > 60) {
+        print("Data do relogio RTC invalida.\n");
+        return;
+    }
+    print_two_digits(day); put_char('/');
+    print_two_digits(month); put_char('/');
+    put_char((char)('0' + (full_year / 1000) % 10));
+    put_char((char)('0' + (full_year / 100) % 10));
+    put_char((char)('0' + (full_year / 10) % 10));
+    put_char((char)('0' + full_year % 10));
+    put_char(' ');
+    print_two_digits(hour); put_char(':');
+    print_two_digits(minute); put_char(':');
+    print_two_digits(second); put_char('\n');
 }
 
 static void report_arch_package_install(int extracted)
@@ -1431,6 +1500,8 @@ static void execute_command(char *command)
         print("Uso: run EXECUTAVEL [ARGUMENTOS...]\n");
     } else if (streq(command, "help")) {
         show_help();
+    } else if (streq(command, "date") || streq(command, "time")) {
+        show_date_time();
     } else if (streq(command, "pacman -Q") || streq(command, "pacman -Qq")) {
         if (!disk_ready) print("Disco indisponivel.\n");
         else {
