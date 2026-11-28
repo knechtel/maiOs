@@ -1,4 +1,5 @@
 *.img
+maios-grub.iso
 /build/
 /libbearssl-maios.a
 /freestanding.o
