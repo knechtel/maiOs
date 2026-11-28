@@ -2007,12 +2007,45 @@ static const char altgr_keymap[128] = {
 static char read_key(void)
 {
     static uint8_t left_shift, right_shift, left_control, right_control, altgr, caps_lock, extended;
+    static uint8_t serial_pending[4], serial_pending_offset, serial_pending_length;
     for (;;) {
         if (network_stack_ready && !maios_background_server_active()) net_poll();
         /* run-grub connects COM1 to the host terminal; pass its typed bytes
            through directly so Linux programs can read from the visible console. */
-        if (serial_console_ready && (inb(0x3FD) & 1u)) {
-            uint8_t value = inb(0x3F8);
+        if (serial_console_ready &&
+            (serial_pending_offset < serial_pending_length || (inb(0x3FD) & 1u))) {
+            uint8_t value;
+            if (serial_pending_offset < serial_pending_length)
+                value = serial_pending[serial_pending_offset++];
+            else {
+                serial_pending_offset = serial_pending_length = 0;
+                value = inb(0x3F8);
+            }
+            if (value == 0x1B) {
+                uint8_t lookahead[2];
+                size_t lookahead_length = 0;
+                unsigned int spins = 100000;
+                while (!(inb(0x3FD) & 1u) && --spins) { }
+                if (spins) {
+                    lookahead[lookahead_length++] = inb(0x3F8);
+                    spins = 100000;
+                    while (!(inb(0x3FD) & 1u) && --spins) { }
+                    if (spins) lookahead[lookahead_length++] = inb(0x3F8);
+                }
+                if (lookahead_length == 2 &&
+                    (lookahead[0] == '[' || lookahead[0] == 'O')) {
+                    switch (lookahead[1]) {
+                    case 'A': return (char)0x80;
+                    case 'B': return (char)0x81;
+                    case 'D': return (char)0x82;
+                    case 'C': return (char)0x83;
+                    default: break;
+                    }
+                }
+                for (size_t i = 0; i < lookahead_length; ++i)
+                    serial_pending[serial_pending_length++] = lookahead[i];
+                return (char)0x1B;
+            }
             if (value == '\r') return '\n';
             if (value == 0x7f) return '\b';
             return (char)value;
@@ -2184,6 +2217,8 @@ static void prompt(void)
 void kernel_main(void)
 {
     char input[INPUT_SIZE];
+    static char history[16][INPUT_SIZE];
+    size_t history_count = 0, history_position = 0;
     size_t length = 0;
 
     /* Keep console output on COM1 so it survives a VGA screen reset. */
@@ -2228,6 +2263,12 @@ void kernel_main(void)
         if (key == '\n') {
             put_char('\n');
             input[length] = '\0';
+            if (length && (!history_count || !streq(input, history[(history_count - 1) % 16]))) {
+                size_t slot = history_count % 16;
+                for (size_t i = 0; i <= length; ++i) history[slot][i] = input[i];
+                ++history_count;
+            }
+            history_position = history_count;
             execute_command(input);
             length = 0;
             prompt();
@@ -2235,6 +2276,28 @@ void kernel_main(void)
             if (length > 0) {
                 --length;
                 put_char('\b');
+            }
+        } else if ((uint8_t)key == 0x80 || (uint8_t)key == 0x81) {
+            if ((uint8_t)key == 0x80) {
+                if (history_position > history_count - (history_count > 16 ? 16 : history_count))
+                    --history_position;
+                else continue;
+            } else {
+                if (history_position < history_count) ++history_position;
+                else continue;
+            }
+            for (size_t i = 0; i < length; ++i) put_char('\b');
+            if (history_position == history_count) {
+                length = 0;
+                input[0] = '\0';
+            } else {
+                size_t slot = history_position % 16;
+                length = 0;
+                while (length < INPUT_SIZE - 1 && history[slot][length]) {
+                    input[length] = history[slot][length];
+                    put_char(input[length++]);
+                }
+                input[length] = '\0';
             }
         } else if (key == '\t') {
             size_t has_arguments = 0;
