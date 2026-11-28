@@ -1,3 +1,0 @@
-inner: can_run_sync False
-inner: RuntimeError True
-outer done

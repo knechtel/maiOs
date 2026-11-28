@@ -1,3 +1,0 @@
-async entry: True
-sync entry: False
-RuntimeError: True
